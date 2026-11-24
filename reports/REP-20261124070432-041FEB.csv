@@ -1,0 +1,50 @@
+OMNISENSE AI — OPERATIONAL INCIDENT & AUDIT REPORT
+Generated At,2026-11-24T07:04:32.466541 UTC
+Filter Range Start,Beginning
+Filter Range End,Current
+
+=== EXECUTIVE SUMMARY METRICS ===
+Metric,Value
+Total Events Recorded,15
+Pending Review Alerts,6
+Confirmed Incidents,9
+False Positive Alarms,0
+Resolved Incidents,0
+Critical Severity Count,4
+High Severity Count,11
+Medium Severity Count,0
+Low Severity Count,0
+Devices Online,1 / 12
+
+=== DETAILED INCIDENT LEDGER ===
+Event ID,Timestamp,Type,Severity,Source,Confidence,Status,Description,Reviewer Notes
+15,2026-11-23T22:07:24.734643,temperature_critical,high,environment_monitoring,0.90,confirmed,Excessive ambient temperature (39.5°C >= 32.0°C) on device env-sensor-01.,Verified by automated Phase 5 operator check
+14,2026-11-23T22:07:24.726347,gas_leak_risk,critical,environment_monitoring,0.95,pending_review,Critical gas concentration detected (620.0 ppm >= 400.0 ppm) on device env-sensor-01.,
+13,2026-11-23T22:06:25.105425,crowd_density_high,high,crowd_monitoring,0.92,confirmed,Crowd count crossed threshold (6 > 4),Operator verified crowd gathering in lobby
+12,2026-11-23T21:45:31.418718,temperature_critical,high,environment_monitoring,0.90,confirmed,Excessive ambient temperature (39.5°C >= 32.0°C) on device env-sensor-01.,Verified by automated Phase 5 operator check
+11,2026-11-23T21:45:31.404258,gas_leak_risk,critical,environment_monitoring,0.95,pending_review,Critical gas concentration detected (620.0 ppm >= 400.0 ppm) on device env-sensor-01.,
+10,2026-11-23T21:45:16.826868,temperature_critical,high,environment_monitoring,0.90,pending_review,Excessive ambient temperature (39.5°C >= 32.0°C) on device env-sensor-01.,
+9,2026-11-23T21:45:16.816273,gas_leak_risk,critical,environment_monitoring,0.95,pending_review,Critical gas concentration detected (620.0 ppm >= 400.0 ppm) on device env-sensor-01.,
+8,2026-11-23T21:45:06.790960,crowd_density_high,high,crowd_monitoring,0.92,confirmed,Crowd count crossed threshold (6 > 4),Operator verified crowd gathering in lobby
+7,2026-11-23T21:44:41.675317,crowd_density_high,high,crowd_monitoring,0.92,confirmed,Crowd count crossed threshold (6 > 4),Operator verified crowd gathering in lobby
+6,2026-11-23T21:29:57.653256,crowd_density_high,high,crowd_monitoring,0.92,confirmed,Crowd count crossed threshold (6 > 4),Operator verified crowd gathering in lobby
+5,2026-11-23T21:29:40.869157,temperature_critical,high,environment_monitoring,0.90,pending_review,Excessive ambient temperature (39.5°C >= 32.0°C) on device env-sensor-01.,
+4,2026-11-23T21:29:40.855189,gas_leak_risk,critical,environment_monitoring,0.95,pending_review,Critical gas concentration detected (620.0 ppm >= 400.0 ppm) on device env-sensor-01.,
+3,2026-11-23T20:37:37.681386,crowd_density_high,high,crowd_monitoring,0.92,confirmed,Crowd count crossed threshold (6 > 4),Operator verified crowd gathering in lobby
+2,2026-11-23T20:11:16.026037,crowd_density_high,high,crowd_monitoring,0.92,confirmed,Crowd count crossed threshold (6 > 4),Operator verified crowd gathering in lobby
+1,2026-11-23T19:52:43.551556,crowd_density_high,high,crowd_monitoring,0.92,confirmed,Crowd count crossed threshold (6 > 4),Operator verified crowd gathering in lobby
+
+=== CONNECTED IOT DEVICE INVENTORY ===
+Device ID,Name,Type,Location,Status,Approval Status,Last Seen
+env-sensor-01,Environment Station Alpha (DHT22 + MQ2 + PIR),environment,Main Facility Area,offline,approved,2026-11-23T22:07:24.715178
+webcam_0,Primary Optical Sensor (Webcam),camera,Entry Lobby,offline,approved,2026-11-23T19:52:43.491859
+auto-sensor-1795469321,Device auto-sensor-1795469321,multisensor,Unassigned Area,offline,pending,2026-11-23T21:28:41.593227
+auto-sensor-1795469378,Device auto-sensor-1795469378,multisensor,Unassigned Area,offline,approved,2026-11-23T21:29:38.657475
+stale-dev-1795469380,Stale Device,environment,Main Zone,offline,approved,2026-11-23T21:28:55.726302
+auto-sensor-1795470314,Device auto-sensor-1795470314,multisensor,Unassigned Area,offline,approved,2026-11-23T21:45:14.703584
+stale-dev-1795470316,Stale Device,environment,Main Zone,offline,approved,2026-11-23T21:44:31.742465
+auto-sensor-1795470328,Device auto-sensor-1795470328,multisensor,Unassigned Area,offline,approved,2026-11-23T21:45:29.227875
+stale-dev-1795470331,Stale Device,environment,Main Zone,offline,approved,2026-11-23T21:44:46.269933
+auto-sensor-1795471642,Device auto-sensor-1795471642,multisensor,Unassigned Area,offline,approved,2026-11-23T22:07:22.623327
+stale-dev-1795471644,Stale Device,environment,Main Zone,offline,approved,2026-11-23T22:06:39.651953
+simulated-env-01,Device simulated-env-01,multisensor,Unassigned Area,online,approved,2026-11-24T07:04:31.948127

@@ -1,0 +1,187 @@
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Float,
+    Boolean,
+    Text,
+    DateTime,
+    ForeignKey,
+    JSON
+)
+from sqlalchemy.orm import relationship
+from backend.database.connection import Base
+
+
+class User(Base):
+    """System operator or administrator user."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(64), unique=True, index=True, nullable=False)
+    email = Column(String(120), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    role = Column(String(32), default="operator")  # "admin", "operator", "viewer"
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    plans = relationship("AgentPlan", back_populates="creator")
+
+
+class AgentPlan(Base):
+    """
+    AI Agent generated plan from natural language command.
+    Requires user approval before any monitoring task can be executed.
+    """
+    __tablename__ = "agent_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    natural_command = Column(Text, nullable=False)
+    intent = Column(String(100), nullable=False)   # e.g., "monitor_crowd_density"
+    domain = Column(String(100), nullable=False)   # e.g., "vision", "iot", "multimodal"
+    modules = Column(JSON, default=list)           # e.g., ["crowd_monitoring", "yolov8n"]
+    source = Column(String(100), nullable=False)    # e.g., "webcam_0", "device_01"
+    rules = Column(JSON, default=dict)             # e.g., {"threshold": 5, "interval_sec": 2}
+    status = Column(String(32), default="pending_approval")  # pending_approval, approved, rejected, executed
+    raw_response = Column(Text, nullable=True)     # Raw response/explanation from LLM or fallback parser
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    creator = relationship("User", back_populates="plans")
+    tasks = relationship("MonitoringTask", back_populates="plan")
+
+
+class MonitoringTask(Base):
+    """
+    Active or stopped monitoring task executed by a plugin.
+    Always tied to an approved plan or explicit administrative action.
+    """
+    __tablename__ = "monitoring_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, ForeignKey("agent_plans.id"), nullable=True)
+    plugin_name = Column(String(64), nullable=False)      # e.g. "crowd_monitoring", "environment_monitoring"
+    target_source = Column(String(128), nullable=False)   # e.g. "webcam_0", "env-sensor-01"
+    status = Column(String(32), default="stopped")        # "running", "stopped", "failed"
+    config = Column(JSON, default=dict)                   # Runtime plugin configuration
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    stopped_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    plan = relationship("AgentPlan", back_populates="tasks")
+
+
+class Device(Base):
+    """Physical or virtual IoT device connected via MQTT."""
+    __tablename__ = "devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_id = Column(String(64), unique=True, index=True, nullable=False)
+    name = Column(String(128), nullable=False)
+    device_type = Column(String(32), nullable=False)      # "environment", "camera", "multisensor"
+    location = Column(String(128), default="Main Zone")
+    status = Column(String(32), default="pending")        # "pending", "online", "offline"
+    approval_status = Column(String(32), default="pending") # "pending", "approved", "rejected"
+    last_seen = Column(DateTime, nullable=True)
+    config = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    telemetry = relationship("DeviceTelemetry", back_populates="device", cascade="all, delete-orphan")
+
+
+class DeviceTelemetry(Base):
+    """Time-series sensor telemetry data received from MQTT devices."""
+    __tablename__ = "device_telemetry"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_id = Column(String(64), ForeignKey("devices.device_id"), index=True, nullable=False)
+    temperature = Column(Float, nullable=True)
+    humidity = Column(Float, nullable=True)
+    gas_level = Column(Float, nullable=True)
+    motion = Column(Boolean, nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    raw_payload = Column(JSON, nullable=True)
+
+    # Relationships
+    device = relationship("Device", back_populates="telemetry")
+
+
+class Event(Base):
+    """
+    Security or environmental incident generated by monitoring plugins.
+    Strict Rule: AI detections are NEVER confirmed automatically.
+    Initial status is always 'pending_review' until an operator reviews it.
+    """
+    __tablename__ = "events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(64), nullable=False)       # e.g., "crowd_density_high", "gas_leak_risk"
+    source = Column(String(64), nullable=False)           # e.g., "crowd_monitoring", "environment_monitoring"
+    confidence = Column(Float, default=0.0)
+    severity = Column(String(32), default="medium")       # "low", "medium", "high", "critical"
+    description = Column(Text, nullable=False)
+    evidence_screenshot_path = Column(String(255), nullable=True)
+    metrics = Column(JSON, default=dict)                  # e.g., {"count": 7, "threshold": 5, "density": "high"}
+    status = Column(String(32), default="pending_review") # "pending_review", "confirmed", "false_positive", "resolved"
+    reviewer_notes = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AuditLog(Base):
+    """
+    Immutable audit log recording every natural language command,
+    safety evaluation, plan decision, and operator action.
+    """
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    command = Column(Text, nullable=False)
+    plan_id = Column(Integer, ForeignKey("agent_plans.id"), nullable=True)
+    decision = Column(String(64), nullable=False)  # "approved_for_review", "blocked", "requires_human_review"
+    safety_notes = Column(Text, nullable=True)
+    details = Column(JSON, default=dict)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ReportRecord(Base):
+    """Generated PDF/CSV audit and incident reports."""
+    __tablename__ = "reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(String(64), unique=True, index=True, nullable=False)
+    format = Column(String(16), nullable=False)            # "pdf", "csv"
+    filename = Column(String(128), nullable=False)
+    file_path = Column(String(255), nullable=False)
+    file_size_bytes = Column(Integer, default=0)
+    start_date = Column(DateTime, nullable=True)
+    end_date = Column(DateTime, nullable=True)
+    summary_metrics = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class MonitoringProfile(Base):
+    """Reusable monitoring presets (e.g. Crowd Safety, Fire Hazard, Restricted Area)."""
+    __tablename__ = "monitoring_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False)
+    description = Column(Text, nullable=False)
+    domain = Column(String(64), nullable=False)            # "vision", "iot", "multimodal"
+    modules = Column(JSON, default=list)
+    source = Column(String(100), nullable=False)
+    rules = Column(JSON, default=dict)
+    duration_minutes = Column(Integer, nullable=True)
+    is_builtin = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+

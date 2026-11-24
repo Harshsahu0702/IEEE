@@ -1,0 +1,9 @@
+{
+  "mqtt_host": "192.168.1.100",
+  "mqtt_port": 1883,
+  "mqtt_username": "omnisense_user",
+  "mqtt_password": "omnisense_pass",
+  "device_id": "uno-q-env-01",
+  "serial_port": "/dev/ttyATH0",
+  "baud_rate": 115200
+}

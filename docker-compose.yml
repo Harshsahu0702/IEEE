@@ -1,0 +1,63 @@
+# ==============================================================================
+# OmniSense AI — Complete Multi-Service Compose Specification
+# ==============================================================================
+# NOTE ON CAMERA HARDWARE:
+# For optimal physical webcam performance, run the backend natively on the host:
+#   python backend/main.py
+# Docker containers on Windows/macOS do not natively pass USB webcams. When run
+# in Docker, OmniSense AI seamlessly activates its high-fidelity synthetic camera
+# generator with HUD overlays for testing and verification.
+# ==============================================================================
+
+services:
+  # 1. Mosquitto MQTT Message Broker
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: omnisense-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+  # 2. FastAPI Modular Backend Monolith
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: omnisense-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - MQTT_BROKER_HOST=mosquitto
+      - MQTT_BROKER_PORT=1883
+      - MQTT_USERNAME=omnisense
+      - MQTT_PASSWORD=omnisense_pass
+      - DATABASE_URL=sqlite:///./omnisense.db
+    volumes:
+      - ./evidence:/app/evidence
+      - ./reports:/app/reports
+      - ./omnisense.db:/app/omnisense.db
+    depends_on:
+      - mosquitto
+
+  # 3. React SOC Web Operations Dashboard (Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: omnisense-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
