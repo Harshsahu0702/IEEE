@@ -22,7 +22,7 @@ class LLMParser:
 
     def __init__(self):
         self.api_key = settings.GEMINI_API_KEY
-        self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+        self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash-lite")
         self._client = None
         if self.api_key:
             try:

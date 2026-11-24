@@ -4,24 +4,23 @@ import { wsService } from '../services/websocket';
 import { useToast } from '../context/ToastContext';
 import {
   Video,
-  Users,
   Activity,
   Flame,
   Thermometer,
-  Droplets,
-  Wifi,
-  WifiOff,
   RefreshCw,
-  ShieldCheck,
   AlertTriangle,
   Smartphone,
   Laptop,
   HelpCircle,
-  ExternalLink,
   RotateCw,
   Siren,
   Volume2,
-  VolumeX
+  VolumeX,
+  Radio,
+  Eye,
+  CheckCircle2,
+  Clock,
+  Gauge
 } from 'lucide-react';
 
 import {
@@ -48,35 +47,16 @@ export const LiveMonitoring = () => {
   const [wsStatus, setWsStatus] = useState('disconnected');
 
   // Camera Source Switcher State
-  const [cameraSource, setCameraSource] = useState('0');
-  const [isSynthetic, setIsSynthetic] = useState(false);
   const [rotation, setRotation] = useState(0);
   const [phoneUrl, setPhoneUrl] = useState('http://192.168.1.15:8080/video');
   const [activeTab, setActiveTab] = useState('laptop'); // 'laptop' or 'phone'
   const [switchingCamera, setSwitchingCamera] = useState(false);
   const [showPhoneHelp, setShowPhoneHelp] = useState(false);
 
-  // Vision Real-time Stats
+  // Vision Stats
   const [visionStats, setVisionStats] = useState({
-    person_count: 0,
-    density_level: 'low',
-    fps: 0,
+    fps: 15,
     timestamp: Date.now()
-  });
-
-  // IoT Sensor Telemetry Buffer for Recharts (keep last 20 points)
-  const [sensorHistory, setSensorHistory] = useState([
-    { time: '00:00', temperature: 24.0, gas_level: 110, humidity: 50 },
-    { time: '00:02', temperature: 24.2, gas_level: 115, humidity: 51 },
-    { time: '00:04', temperature: 24.1, gas_level: 120, humidity: 49 },
-  ]);
-
-  const [currentTelemetry, setCurrentTelemetry] = useState({
-    temperature: 24.1,
-    gas_level: 120,
-    humidity: 49,
-    motion: false,
-    device_id: 'env-sensor-01'
   });
 
   // Threat & Hardware Alarm State (Audio Siren + Red Strobe)
@@ -98,26 +78,28 @@ export const LiveMonitoring = () => {
         ctx.resume();
       }
 
-      let toggle = false;
       if (sirenIntervalRef.current) clearInterval(sirenIntervalRef.current);
 
-      sirenIntervalRef.current = setInterval(() => {
-        try {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sawtooth';
-          osc.frequency.value = toggle ? 880 : 587;
-          gain.gain.setValueAtTime(0.12, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.28);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start();
-          osc.stop(ctx.currentTime + 0.3);
-          toggle = !toggle;
-        } catch (e) {}
-      }, 320);
+      let high = false;
+      const playTone = () => {
+        if (!audioCtxRef.current || isMuted) return;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(high ? 960 : 720, ctx.currentTime);
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.28);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.28);
+        high = !high;
+      };
+
+      playTone();
+      sirenIntervalRef.current = setInterval(playTone, 320);
     } catch (e) {
-      console.warn('Audio alarm initialization warning:', e);
+      console.warn('AudioContext failed:', e);
     }
   };
 
@@ -126,221 +108,204 @@ export const LiveMonitoring = () => {
       clearInterval(sirenIntervalRef.current);
       sirenIntervalRef.current = null;
     }
-    setAlarmActive(false);
-    api.devices.setAlarm(false, 'none', 'Alarm silenced by operator').catch(() => {});
   };
 
-  const triggerAlarm = (msg, threatType = 'weapon_threat') => {
-    setAlarmActive(true);
-    setAlarmMessage(msg);
-    startSiren();
-    addToast(msg, 'error');
-    api.devices.setAlarm(true, threatType, msg).catch(() => {});
+  const playAlertChime = () => {
+    try {
+      if (isMuted) return;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = audioCtxRef.current || new AudioCtx();
+      audioCtxRef.current = ctx;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.35);
+    } catch (e) {
+      console.warn('Alert chime failed:', e);
+    }
+  };
+
+  const dismissAlarm = async () => {
+    stopSiren();
+    setAlarmActive(false);
+    try {
+      await api.devices.resetAlarm();
+    } catch (e) {
+      console.error('Reset alarm failed:', e);
+    }
+    addToast({
+      type: 'info',
+      title: '🚨 Hardware Alarm Cleared',
+      message: 'Physical buzzer stopped and audio siren silenced.',
+      duration: 3000
+    });
   };
 
   useEffect(() => {
-    // Fetch initial camera source state
-    api.video.getSource()
-      .then((res) => {
-        setCameraSource(res.source);
-        setIsSynthetic(res.is_synthetic);
-        if (res.rotation !== undefined) {
-          setRotation(res.rotation);
-        }
-        if (res.source.startsWith('http')) {
-          setActiveTab('phone');
-          setPhoneUrl(res.source);
-        } else {
-          setActiveTab('laptop');
-        }
-      })
-      .catch(() => {});
-
-    // Listen for WebSocket connection status
+    // 1. WebSocket status
     const unsubStatus = wsService.onStatusChange((status) => {
       setWsStatus(status);
     });
 
-
-    // Subscribe to live WebSocket messages
-    const unsubMessages = wsService.subscribe((payload) => {
-      if (payload.type === 'vision_update') {
-        setVisionStats({
-          person_count: payload.person_count,
-          density_level: payload.density_level,
-          fps: payload.fps,
-          timestamp: Date.now()
-        });
-      } else if (payload.type === 'universal_monitor_update') {
-        // Universal VLM Monitor — feeds AdaptiveMonitorPanel
-        setUniversalMonitorData(payload);
-        if (payload.goal) setActiveGoal(payload.goal);
-        // Trigger alarm if physical danger
-        if (payload.action_required === 'alarm' && payload.incident_detected) {
-          triggerAlarm(payload.explanation || 'CRITICAL: Anomaly detected by AI monitor!', 'universal_threat');
+    // 2. Subscribe to WebSocket broadcasts
+    const unsubMessages = wsService.subscribe((msg) => {
+      if (msg.type === 'universal_monitor_update') {
+        setUniversalMonitorData(msg);
+        if (msg.goal) setActiveGoal(msg.goal);
+        if (msg.incident_detected) {
+          if (msg.action_required === 'alarm') {
+            setAlarmActive(true);
+            setAlarmMessage(msg.explanation || 'Universal AI alarm triggered!');
+            startSiren();
+          } else {
+            playAlertChime();
+          }
         }
-      } else if (payload.type === 'telemetry_update') {
-        const t = payload.telemetry;
-        setCurrentTelemetry(t);
-        const timeStr = new Date().toLocaleTimeString().slice(3, 8);
-
-        setSensorHistory((prev) => {
-          const next = [
-            ...prev,
-            {
-              time: timeStr,
-              temperature: t.temperature,
-              gas_level: t.gas_level,
-              humidity: t.humidity
-            }
-          ];
-          return next.slice(-20); // Keep last 20 points
-        });
-      } else if (payload.type === 'threat_alert' || payload.type === 'event_alert') {
-        const evt = payload.event || payload;
-        if (evt.severity === 'critical' || evt.event_type?.includes('threat') || evt.alarm || evt.event_type?.includes('violence')) {
-          triggerAlarm(evt.description || 'CRITICAL THREAT: Brandished Weapon or Physical Altercation Detected!');
+      } else if (msg.type === 'vision_update') {
+        setVisionStats((prev) => ({
+          ...prev,
+          fps: msg.fps || prev.fps,
+          timestamp: Date.now()
+        }));
+      } else if (msg.type === 'threat_alarm') {
+        setAlarmActive(true);
+        setAlarmMessage(msg.description || 'Threat or hazard detected!');
+        startSiren();
+      } else if (msg.type === 'alarm_status') {
+        if (msg.alarm_active) {
+          setAlarmActive(true);
+          setAlarmMessage(msg.threat_type ? `Alarm Active: ${msg.threat_type}` : 'Physical Strobe Triggered');
+          startSiren();
+        } else {
+          stopSiren();
+          setAlarmActive(false);
         }
       }
     });
 
+    // 3. Check active task on mount
+    const checkActiveTask = async () => {
+      try {
+        const tasks = await api.tasks.list();
+        const active = tasks.find((t) => t.status === 'running');
+        if (active && active.config?.user_goal) {
+          setActiveGoal(active.config.user_goal);
+        }
+      } catch (e) {
+        console.error('Failed to query tasks:', e);
+      }
+    };
+    checkActiveTask();
+
     return () => {
       unsubStatus();
       unsubMessages();
+      stopSiren();
     };
-  }, []);
+  }, [isMuted]);
 
   const refreshStream = () => {
     setStreamError(false);
-    setVideoSrc(`${api.getVideoStreamUrl()}&_t=${Date.now()}`);
+    setVideoSrc(api.getVideoStreamUrl() + `&_t=${Date.now()}`);
   };
 
-  const handleRotate = async () => {
-    const nextRot = (rotation + 90) % 360;
-    try {
-      const res = await api.video.setRotation(nextRot);
-      setRotation(res.rotation);
-      refreshStream();
-      addToast(`Camera feed rotated to ${res.rotation}°`, 'info');
-    } catch (err) {
-      addToast('Failed to rotate camera', 'error');
-    }
-  };
-
-  const handleSwitchSource = async (newSource) => {
+  const handleSwitchSource = async (source) => {
     setSwitchingCamera(true);
     try {
-      const res = await api.video.setSource(newSource);
-      setCameraSource(res.source);
-      setIsSynthetic(res.is_synthetic);
-      refreshStream();
-      addToast(res.message, res.success ? 'success' : 'info');
-    } catch (err) {
-      addToast(err.message || 'Failed to switch camera source', 'error');
+      const res = await api.video.switchCamera(source);
+      if (res.success) {
+        addToast({
+          type: 'success',
+          title: 'Camera Switched Successfully',
+          message: `Switched stream input to ${res.source_type} (${res.new_source}).`,
+          duration: 3500
+        });
+        refreshStream();
+      } else {
+        addToast({
+          type: 'error',
+          title: 'Camera Switch Failed',
+          message: res.error || 'Failed to switch camera.',
+          duration: 5000
+        });
+      }
+    } catch (e) {
+      addToast({
+        type: 'error',
+        title: 'Connection Error',
+        message: e.message || 'Could not reach server to switch camera.',
+        duration: 5000
+      });
     } finally {
       setSwitchingCamera(false);
     }
   };
 
-  const densityBadge = {
-    low: { bg: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' },
-    medium: { bg: 'bg-amber-500/20 text-amber-400 border-amber-500/30' },
-    high: { bg: 'bg-rose-500/20 text-rose-400 border-rose-500/30 animate-pulse' }
-  }[visionStats.density_level.toLowerCase()] || { bg: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' };
+  const handleRotate = async () => {
+    const nextRot = (rotation + 90) % 360;
+    try {
+      const res = await api.video.rotateCamera(nextRot);
+      if (res.success) {
+        setRotation(nextRot);
+        addToast({
+          type: 'info',
+          title: `Orientation Changed: ${nextRot}°`,
+          message: nextRot === 0 ? 'Normal orientation restored.' : `Stream rotated by ${nextRot} degrees clockwise.`,
+          duration: 2500
+        });
+        refreshStream();
+      }
+    } catch (e) {
+      console.error('Failed to rotate camera:', e);
+    }
+  };
 
   return (
     <div className="space-y-6">
-      {/* Page Title & Status */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-            <Video className="w-5 h-5 text-cyan-400" />
-            <span>Live Surveillance & Telemetry Feed</span>
-          </h1>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Real-time optical stream with YOLO person detection HUD & IoT environmental sensor charts.
-          </p>
-        </div>
-
-        {/* WebSocket Health Banner */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-dark-900 border border-dark-800 text-xs font-mono">
-            {wsStatus === 'connected' ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-emerald-400 radar-online" />
-                <span className="text-emerald-400">SOCKET SYNCED</span>
-              </>
-            ) : (
-              <>
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                <span className="text-amber-400">RECONNECTING...</span>
-              </>
-            )}
-          </div>
-          <button
-            onClick={() => {
-              if (alarmActive) {
-                stopSiren();
-              } else {
-                triggerAlarm("EMERGENCY ALERT: Brandished Weapon & Physical Altercation Detected! Arduino Pin 13 LED Strobe Active.");
-              }
-            }}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-mono font-semibold transition ${
-              alarmActive
-                ? 'bg-rose-500 text-white animate-bounce shadow-lg shadow-rose-950'
-                : 'bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300'
-            }`}
-            title="Simulate / Trigger Threat Siren & Arduino LED"
-          >
-            <Siren className="w-4 h-4 text-rose-400" />
-            <span>{alarmActive ? 'Silence Alarm' : 'Test Threat Alarm'}</span>
-          </button>
-          <button
-            onClick={handleRotate}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-slate-300 hover:text-cyan-400 transition-colors text-xs font-mono"
-            title="Rotate Video Stream 90 Degrees"
-          >
-            <RotateCw className="w-4 h-4 text-cyan-400" />
-            <span>Rotate {rotation}°</span>
-          </button>
-          <button
-            onClick={refreshStream}
-            className="p-2 rounded-xl bg-dark-900 hover:bg-dark-800 border border-dark-800 text-slate-300 hover:text-white transition-colors"
-            title="Reload Video Stream"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-
-      {/* Critical Security Threat & Hardware Alarm Banner */}
+      {/* Hardware Alarm Warning Modal */}
       {alarmActive && (
-        <div className="bg-rose-950/70 border-2 border-rose-500 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 animate-pulse shadow-2xl shadow-rose-950">
-          <div className="flex items-center gap-3">
-            <div className="p-3 bg-rose-500 text-white rounded-xl animate-bounce flex-shrink-0">
-              <Siren className="w-6 h-6" />
+        <div className="bg-rose-50 border-2 border-rose-500 rounded-2xl p-5 shadow-lg flex flex-col sm:flex-row items-center justify-between gap-4 animate-bounce">
+          <div className="flex items-center gap-3.5">
+            <div className="w-12 h-12 rounded-xl bg-rose-500 text-white flex items-center justify-center flex-shrink-0 animate-pulse">
+              <Siren className="w-7 h-7" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-white tracking-wide uppercase flex items-center gap-2">
-                <span>EMERGENCY THREAT ALARM ACTIVE</span>
-                <span className="px-2 py-0.5 rounded bg-rose-500 text-white text-[10px] font-mono font-bold animate-ping">
-                  ARDUINO PIN 13 LED STROBE ON
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-rose-900 text-sm tracking-wide uppercase font-mono">
+                  🚨 CRITICAL INCIDENT ALARM
                 </span>
-              </h3>
-              <p className="text-xs text-rose-200 mt-1 font-mono">{alarmMessage}</p>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-200 text-rose-900">
+                  ARDUINO STROBE TRIGGERED
+                </span>
+              </div>
+              <p className="text-xs text-rose-700 mt-1 font-medium">{alarmMessage}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+
+          <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
             <button
-              onClick={() => setIsMuted(!isMuted)}
-              className="px-3 py-2 rounded-xl bg-dark-900 hover:bg-dark-850 text-slate-200 border border-dark-700 text-xs font-mono flex items-center gap-1.5 transition"
+              onClick={() => {
+                if (!isMuted) stopSiren();
+                setIsMuted(!isMuted);
+              }}
+              className="px-3 py-2 rounded-xl bg-rose-100 hover:bg-rose-200 text-rose-800 text-xs font-mono font-bold transition flex items-center gap-1.5"
             >
-              {isMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4 text-emerald-400" />}
-              <span>{isMuted ? 'Unmute Siren' : 'Mute Siren'}</span>
+              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              {isMuted ? 'Unmute' : 'Mute'}
             </button>
             <button
-              onClick={stopSiren}
-              className="px-4 py-2 bg-rose-500 hover:bg-rose-400 text-white font-bold text-xs rounded-xl shadow-lg transition"
+              onClick={dismissAlarm}
+              className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-mono font-bold transition shadow-sm"
             >
               Dismiss Alarm
             </button>
@@ -348,168 +313,195 @@ export const LiveMonitoring = () => {
         </div>
       )}
 
-      {/* Camera Input Source Switcher (Laptop vs Phone IP Camera) */}
-      <div className="bg-dark-900 border border-dark-800 rounded-2xl p-4 space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+        <div>
           <div className="flex items-center gap-2">
-            <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-bold flex items-center gap-1.5">
-              <Video className="w-4 h-4 text-emerald-400" />
-              Camera Source:
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 radar-online" />
+            <h1 className="text-xl font-bold tracking-tight text-slate-900">
+              Live AI Video Monitor
+            </h1>
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              1080p · 15fps
             </span>
-            <div className="flex items-center gap-1.5 bg-dark-950 p-1 rounded-xl border border-dark-800">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('laptop');
-                  handleSwitchSource('0');
-                }}
-                disabled={switchingCamera}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition ${
-                  activeTab === 'laptop'
-                    ? 'bg-emerald-500 text-dark-950 shadow-md'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Laptop className="w-3.5 h-3.5" />
-                Laptop Webcam
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab('phone')}
-                disabled={switchingCamera}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition ${
-                  activeTab === 'phone'
-                    ? 'bg-cyan-500 text-dark-950 shadow-md'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Smartphone className="w-3.5 h-3.5" />
-                Mobile Phone (IP Cam)
-              </button>
-            </div>
           </div>
-
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span className="text-slate-400">Status:</span>
-            {!isSynthetic ? (
-              <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5 text-[11px]">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                LIVE HARDWARE STREAM ({cameraSource})
-              </span>
-            ) : (
-              <span className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5 text-[11px]">
-                STANDBY / TEST GENERATOR
-              </span>
-            )}
-          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            Real-time optical feed with dynamic motion tracking and vision-language reasoning.
+          </p>
         </div>
 
-        {/* Mobile Phone IP Camera Configuration Input */}
-        {activeTab === 'phone' && (
-          <div className="pt-2 border-t border-dark-800/80 space-y-2">
-            <div className="flex flex-col sm:flex-row items-center gap-2">
-              <div className="relative flex-1 w-full">
-                <input
-                  type="text"
-                  value={phoneUrl}
-                  onChange={(e) => setPhoneUrl(e.target.value)}
-                  placeholder="e.g. http://192.168.1.15:8080/video"
-                  className="w-full bg-dark-950 border border-dark-700 rounded-xl px-3.5 py-2 text-xs text-cyan-300 font-mono placeholder-slate-600 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => handleSwitchSource(phoneUrl)}
-                disabled={switchingCamera || !phoneUrl.trim()}
-                className="w-full sm:w-auto px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-dark-950 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 shadow-md shadow-cyan-950"
-              >
-                {switchingCamera ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Connecting...
-                  </>
-                ) : (
-                  <>
-                    <Smartphone className="w-3.5 h-3.5" /> Connect Phone Camera
-                  </>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowPhoneHelp(!showPhoneHelp)}
-                className="px-3 py-2 bg-dark-800 hover:bg-dark-750 text-slate-300 text-xs rounded-xl border border-dark-700 flex items-center gap-1"
-              >
-                <HelpCircle className="w-3.5 h-3.5 text-cyan-400" />
-                {showPhoneHelp ? 'Hide Guide' : 'How to Setup Phone?'}
-              </button>
-            </div>
-
-            {/* Step-by-Step Setup Instructions for Phone Camera */}
-            {showPhoneHelp && (
-              <div className="bg-dark-950 border border-cyan-500/30 rounded-xl p-4 text-xs text-slate-300 space-y-2 animate-fadeIn">
-                <div className="font-bold text-cyan-300 flex items-center gap-1.5">
-                  <Smartphone className="w-4 h-4" />
-                  Phone Camera Kaise Connect Karein? (4 Easy Steps):
-                </div>
-                <ol className="list-decimal list-inside space-y-1 text-slate-300 text-[11px] leading-relaxed">
-                  <li>Apne phone me Google Play Store / App Store se free app <strong className="text-white">"IP Webcam"</strong> (ya <strong className="text-white">"DroidCam"</strong>) install karein.</li>
-                  <li>Phone aur Laptop dono ko <strong className="text-white">same Wi-Fi network</strong> (ya phone ke Mobile Hotspot) se connect karein.</li>
-                  <li>Phone me IP Webcam app khol kar sabse niche scroll karein aur <strong className="text-emerald-400">"Start server"</strong> par click karein.</li>
-                  <li>Phone screen par jo URL likha aayega (jaise: <code className="bg-dark-800 text-cyan-300 px-1 py-0.5 rounded">http://192.168.1.15:8080/video</code>), use upar wale box me paste karke <strong className="text-cyan-400">"Connect Phone Camera"</strong> dabayein!</li>
-                </ol>
-              </div>
-            )}
+        {/* Stream Source Selector */}
+        <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-xl p-1 bg-slate-100 border border-slate-200 text-xs">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('laptop');
+                handleSwitchSource('0');
+              }}
+              disabled={switchingCamera}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition ${
+                activeTab === 'laptop'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Laptop className="w-3.5 h-3.5" />
+              <span>Webcam</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('phone')}
+              disabled={switchingCamera}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition ${
+                activeTab === 'phone'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>Phone Stream</span>
+            </button>
           </div>
-        )}
+
+          <button
+            onClick={handleRotate}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-medium transition shadow-sm"
+            title="Rotate camera 90°"
+          >
+            <RotateCw className="w-3.5 h-3.5 text-slate-600" />
+            <span>Rotate {rotation}°</span>
+          </button>
+
+          <button
+            onClick={refreshStream}
+            className="p-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-600 hover:text-slate-900 transition shadow-sm"
+            title="Refresh stream"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
-      {/* Real-time Detection Status & Orientation Tip Banner */}
-      <div className="bg-gradient-to-r from-cyan-950/40 via-dark-900 to-emerald-950/30 border border-cyan-800/40 rounded-xl p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2.5 text-cyan-200">
-          <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-          <span>
-            <strong className="text-white">Live AI Person Detection Active:</strong> Bounding boxes aur count automatically live stream par dikhenge. Agar camera sideways hai ya bed par lette huye test kar rahe hain, toh <strong className="text-cyan-300">"Rotate {rotation}°"</strong> dabakar seedha karein.
+      {/* Phone Camera Setup Drawer */}
+      {activeTab === 'phone' && (
+        <div className="p-4 rounded-xl bg-white border border-slate-200 space-y-3 shadow-sm">
+          <div className="flex flex-col sm:flex-row items-center gap-2">
+            <input
+              type="text"
+              value={phoneUrl}
+              onChange={(e) => setPhoneUrl(e.target.value)}
+              placeholder="e.g. http://192.168.1.15:8080/video"
+              className="flex-1 w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs text-slate-800 font-mono focus:outline-none focus:border-slate-400"
+            />
+            <button
+              type="button"
+              onClick={() => handleSwitchSource(phoneUrl)}
+              disabled={switchingCamera || !phoneUrl.trim()}
+              className="w-full sm:w-auto px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium rounded-xl transition flex items-center justify-center gap-1.5"
+            >
+              {switchingCamera ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Smartphone className="w-3.5 h-3.5" />}
+              <span>Connect Phone Stream</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowPhoneHelp(!showPhoneHelp)}
+              className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs rounded-xl flex items-center gap-1"
+            >
+              <HelpCircle className="w-3.5 h-3.5" />
+              <span>{showPhoneHelp ? 'Hide Guide' : 'Setup Guide'}</span>
+            </button>
+          </div>
+
+          {showPhoneHelp && (
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-2">
+              <p className="font-semibold text-slate-800 flex items-center gap-1.5">
+                <Smartphone className="w-4 h-4 text-emerald-600" />
+                How to Connect Phone Camera:
+              </p>
+              <ol className="list-decimal list-inside space-y-1 text-[11px] leading-relaxed text-slate-600">
+                <li>Install the free <strong>"IP Webcam"</strong> or <strong>"DroidCam"</strong> app on your smartphone.</li>
+                <li>Connect your phone and PC to the <strong>same Wi-Fi network</strong> (or phone hotspot).</li>
+                <li>Open IP Webcam, scroll down and tap <strong>"Start server"</strong>.</li>
+                <li>Copy the displayed URL (e.g. <code>http://192.168.1.15:8080/video</code>) into the box above and click Connect.</li>
+              </ol>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Active Goal Indicator Banner */}
+      {activeGoal && (
+        <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 shadow-sm text-xs font-medium">
+          <div className="flex items-center gap-2">
+            <Eye className="w-4 h-4 text-emerald-700 flex-shrink-0" />
+            <span>Active Goal:</span>
+            <span className="font-semibold text-emerald-950 font-mono">"{activeGoal}"</span>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold uppercase tracking-wider">
+            Universal VLM Guard
           </span>
         </div>
-        <button
-          onClick={handleRotate}
-          className="px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 rounded-xl text-xs font-mono font-semibold flex items-center gap-1.5 flex-shrink-0 transition"
-        >
-          <RotateCw className="w-3.5 h-3.5" /> Rotate 90°
-        </button>
-      </div>
+      )}
 
-      {/* Main Vision Panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Optical Stream Player (2 Columns) */}
-        <div className="lg:col-span-2 bg-dark-900 border border-dark-800 rounded-2xl overflow-hidden shadow-2xl relative flex flex-col">
-          {/* Stream Overlay Bar */}
-          <div className="bg-dark-950/80 backdrop-blur-md px-4 py-3 border-b border-dark-800 flex items-center justify-between z-10">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
-              <span className="text-xs font-mono font-bold tracking-wider text-slate-200 uppercase">
-                {activeTab === 'phone' ? 'MOBILE PHONE CAMERA FEED' : 'LAPTOP WEBCAM FEED'}
+      {/* Real-time Prompt Trigger Alert Banner */}
+      {universalMonitorData?.incident_detected && (
+        <div className="bg-amber-50 border-2 border-amber-400 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3 animate-pulse">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center flex-shrink-0">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-amber-900 text-xs tracking-wider uppercase font-mono">
+                  ⚠️ PROMPT ALERT: {universalMonitorData.action_required?.toUpperCase() || 'TRIGGERED'}
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-200 text-amber-900">
+                  {Math.round((universalMonitorData.confidence || 0.8) * 100)}% CONFIDENCE
+                </span>
+              </div>
+              <p className="text-xs text-amber-800 mt-0.5 font-medium">
+                {universalMonitorData.explanation || 'Monitored target condition observed in camera feed.'}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              setUniversalMonitorData((prev) => prev ? { ...prev, incident_detected: false } : null);
+            }}
+            className="px-3.5 py-1.5 rounded-xl bg-amber-200 hover:bg-amber-300 text-amber-900 text-xs font-semibold transition"
+          >
+            Acknowledge
+          </button>
+        </div>
+      )}
+
+      {/* =====================================================
+          SIDE-BY-SIDE VIDEO FEED & MONITORING GRAPHS
+          Video on the left (7 cols), Adaptive Graphs on the right (5 cols)
+          ===================================================== */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm flex flex-col">
+          {/* Top Control Header */}
+          <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between bg-white">
+            <div className="flex items-center gap-2.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 radar-online" />
+              <span className="text-xs font-mono font-bold tracking-wider text-slate-800 uppercase">
+                CAM-01 · {activeTab === 'phone' ? 'MOBILE PHONE OPTICAL FEED' : 'PRIMARY LAPTOP OPTICAL FEED'}
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-50 text-emerald-700 border border-emerald-200">
+                LIVE
               </span>
             </div>
-            <div className="flex items-center gap-3 text-xs font-mono">
-              <button
-                onClick={handleRotate}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-dark-900 hover:bg-dark-800 border border-dark-750 text-slate-300 hover:text-cyan-300 transition-colors text-[11px]"
-                title="Rotate 90 degrees"
-              >
-                <RotateCw className="w-3 h-3 text-cyan-400" />
-                <span>Rotate {rotation}°</span>
-              </button>
-              <span className="text-slate-400">FPS: <strong className="text-emerald-400">{visionStats.fps || 15}</strong></span>
-              <span className={`px-2 py-0.5 rounded border text-[11px] font-bold uppercase ${densityBadge.bg}`}>
-                {visionStats.density_level} DENSITY
-              </span>
+
+            <div className="flex items-center gap-4 text-xs font-mono text-slate-500">
+              <span>FPS: <strong className="text-emerald-600">{visionStats.fps || 15}</strong></span>
+              <span>Motion Bounding: <strong className="text-slate-800 font-semibold">Active</strong></span>
             </div>
           </div>
 
-
-          {/* Video Stream Container */}
-          <div className="relative aspect-video bg-dark-950 flex items-center justify-center overflow-hidden">
+          {/* Video Viewport Container */}
+          <div className="relative aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
             {!streamError ? (
               <img
                 src={videoSrc}
@@ -519,171 +511,49 @@ export const LiveMonitoring = () => {
               />
             ) : (
               <div className="p-8 text-center space-y-3">
-                <AlertTriangle className="w-10 h-10 text-amber-400 mx-auto" />
-                <h4 className="text-sm font-semibold text-white">Optical Stream Offline</h4>
+                <AlertTriangle className="w-10 h-10 text-amber-500 mx-auto" />
+                <h4 className="text-sm font-semibold text-white">Video Stream Offline</h4>
                 <p className="text-xs text-slate-400 max-w-sm">
-                  Start a crowd monitoring task from the AI Command Center to activate the live feed.
+                  Ensure camera is plugged in or start a monitoring task from AI Command Center.
                 </p>
                 <button
                   onClick={refreshStream}
-                  className="px-4 py-2 rounded-xl bg-dark-800 hover:bg-dark-750 text-emerald-400 border border-emerald-500/30 text-xs font-mono transition-colors"
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 text-xs font-mono transition-colors"
                 >
-                  Retry Connection
+                  Retry Stream
                 </button>
               </div>
             )}
 
-            {/* Privacy Guardrail Watermark */}
-            <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded-md bg-dark-950/70 backdrop-blur-sm border border-dark-700/50 text-[10px] font-mono text-slate-400">
-              🔒 Privacy Protocol: Aggregate Count Only &bull; Zero Biometric ID
+            {/* Privacy Protocol Badge */}
+            <div className="absolute bottom-3 left-3 px-3 py-1 rounded-md bg-slate-900/80 backdrop-blur-sm border border-slate-700 text-[10px] font-mono text-slate-300">
+              🔒 Privacy Protocol: Aggregate Count &bull; Zero Biometric ID &bull; Motion Bounding Active
             </div>
           </div>
         </div>
 
-        {/* Live Metrics & Quick Stats (1 Column) */}
-        <div className="space-y-4 flex flex-col justify-between">
-          {/* Person Count HUD Card */}
-          <div className="p-5 rounded-2xl bg-dark-900 border border-dark-800 space-y-3">
-            <span className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-              <Users className="w-4 h-4 text-emerald-400" />
-              <span>Real-Time Person Count</span>
-            </span>
-            <div className="flex items-baseline gap-3">
-              <span className="text-5xl font-extrabold font-mono text-white tracking-tight">
-                {visionStats.person_count}
-              </span>
-              <span className="text-xs text-slate-400 font-mono">detected in view</span>
+        {/* =====================================================
+            CONTEXT-ADAPTIVE MONITORING PANEL (SIDE-BY-SIDE)
+            Renders dynamically beside the video feed.
+            ===================================================== */}
+        <div className="lg:col-span-5 space-y-5">
+          {universalMonitorData ? (
+            <AdaptiveMonitorPanel wsData={universalMonitorData} goal={activeGoal} sideBySide />
+          ) : (
+            <div className="p-8 rounded-2xl bg-white border border-slate-200 text-center space-y-3 shadow-sm">
+              <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
+                <Radio className="w-6 h-6 animate-pulse" />
+              </div>
+              <h3 className="text-sm font-semibold text-slate-900">Universal Monitor Ready</h3>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Go to the <strong>AI Command Center</strong> and type any natural language monitoring goal (e.g. <em>"Monitor if fan is moving"</em>, <em>"Watch for exam cheating"</em>, or <em>"Detect falls"</em>).
+              </p>
             </div>
-            <div className="pt-2 border-t border-dark-800 flex items-center justify-between text-xs font-mono text-slate-400">
-              <span>Spatial Density:</span>
-              <span className={`px-2 py-0.5 rounded font-bold uppercase ${densityBadge.bg}`}>
-                {visionStats.density_level}
-              </span>
-            </div>
-          </div>
-
-          {/* Environmental Sensor Gauge Cards */}
-          <div className="p-5 rounded-2xl bg-dark-900 border border-dark-800 space-y-4">
-            <span className="text-xs font-mono font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-              <Activity className="w-4 h-4 text-cyan-400" />
-              <span>Current IoT Telemetry</span>
-            </span>
-
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div className="p-3 rounded-xl bg-dark-950 border border-dark-800">
-                <div className="flex items-center gap-1.5 text-slate-400 mb-1">
-                  <Thermometer className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Temperature</span>
-                </div>
-                <span className="text-lg font-bold font-mono text-white">{currentTelemetry.temperature}&deg;C</span>
-                <p className="text-[10px] text-slate-400 font-mono">Limit: 32.0&deg;C</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-dark-950 border border-dark-800">
-                <div className="flex items-center gap-1.5 text-slate-400 mb-1">
-                  <Flame className="w-3.5 h-3.5 text-rose-400" />
-                  <span>MQ-2 Gas</span>
-                </div>
-                <span className={`text-lg font-bold font-mono ${currentTelemetry.gas_level >= 400 ? 'text-rose-400 animate-pulse' : 'text-white'}`}>
-                  {currentTelemetry.gas_level} <span className="text-xs font-normal text-slate-400">ppm</span>
-                </span>
-                <p className="text-[10px] text-slate-400 font-mono">Hazard Limit: 400</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-dark-950 border border-dark-800">
-                <div className="flex items-center gap-1.5 text-slate-400 mb-1">
-                  <Droplets className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Humidity</span>
-                </div>
-                <span className="text-lg font-bold font-mono text-white">{currentTelemetry.humidity}%</span>
-                <p className="text-[10px] text-slate-400 font-mono">Nominal: 20-75%</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-dark-950 border border-dark-800">
-                <div className="flex items-center gap-1.5 text-slate-400 mb-1">
-                  <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>PIR Motion</span>
-                </div>
-                <span className={`text-sm font-bold font-mono uppercase ${currentTelemetry.motion ? 'text-emerald-400' : 'text-slate-400'}`}>
-                  {currentTelemetry.motion ? 'Active' : 'Clear'}
-                </span>
-                <p className="text-[10px] text-slate-400 font-mono">Station Alpha</p>
-              </div>
-            </div>
-          </div>
+          )}
         </div>
       </div>
-
-
-      {/* =====================================================
-          ADAPTIVE MONITORING PANEL
-          Renders dynamically based on the active monitoring goal.
-          Replaces the need for hardcoded static charts.
-          ===================================================== */}
-      {universalMonitorData ? (
-        <AdaptiveMonitorPanel wsData={universalMonitorData} goal={activeGoal} />
-      ) : (
-        /* Legacy static charts — shown only when no universal monitor is active */
-      <>
-      {/* Real-time Recharts Line Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Temperature Trend */}
-        <div className="p-5 rounded-2xl bg-dark-900 border border-dark-800 space-y-4">
-          <div className="flex items-center justify-between border-b border-dark-800 pb-3">
-            <h3 className="text-xs font-mono font-semibold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-              <Thermometer className="w-4 h-4 text-amber-400" />
-              <span>Ambient Temperature History (&deg;C)</span>
-            </h3>
-            <span className="text-[11px] font-mono text-amber-400">Threshold: 32&deg;C</span>
-          </div>
-
-          <div className="h-48 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={sensorHistory}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f293d" />
-                <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 10 }} />
-                <YAxis domain={[15, 45]} stroke="#64748b" tick={{ fontSize: 10 }} />
-                <Tooltip
-                  contentStyle={{ backgroundColor: '#0e1117', borderColor: '#283149', borderRadius: '8px', fontSize: '11px' }}
-                />
-                <ReferenceLine y={32} stroke="#f59e0b" strokeDasharray="4 4" label={{ value: 'MAX 32°C', fill: '#f59e0b', fontSize: 10 }} />
-                <Line type="monotone" dataKey="temperature" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* Gas Concentration Trend */}
-        <div className="p-5 rounded-2xl bg-dark-900 border border-dark-800 space-y-4">
-          <div className="flex items-center justify-between border-b border-dark-800 pb-3">
-            <h3 className="text-xs font-mono font-semibold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-              <Flame className="w-4 h-4 text-rose-400" />
-              <span>MQ-2 Gas / Smoke Concentration (ppm)</span>
-            </h3>
-            <span className="text-[11px] font-mono text-rose-400">Hazard Line: 400 ppm</span>
-          </div>
-
-          <div className="h-48 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={sensorHistory}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f293d" />
-                <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 10 }} />
-                <YAxis domain={[0, 700]} stroke="#64748b" tick={{ fontSize: 10 }} />
-                <Tooltip
-                  contentStyle={{ backgroundColor: '#0e1117', borderColor: '#283149', borderRadius: '8px', fontSize: '11px' }}
-                />
-                <ReferenceLine y={400} stroke="#f43f5e" strokeDasharray="4 4" label={{ value: 'HAZARD 400 ppm', fill: '#f43f5e', fontSize: 10 }} />
-                <Line type="monotone" dataKey="gas_level" stroke="#f43f5e" strokeWidth={2} dot={false} isAnimationActive={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </div>
-      </>
-      )}
     </div>
   );
 };
 
 export default LiveMonitoring;
-

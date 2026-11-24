@@ -20,6 +20,7 @@ Supports:
 import base64
 import json
 import logging
+import re
 import time
 from typing import Optional
 import cv2
@@ -79,8 +80,8 @@ def _encode_frame_b64(frame: np.ndarray, quality: int = 70) -> str:
 
 def _build_prompt(user_goal: str, context: dict) -> str:
     """
-    Build a structured system+user prompt for the VLM.
-    context: extra info such as sensor readings (temp, gas, motion) from Arduino.
+    Build a structured system+user prompt for the VLM that strictly enforces
+    user-defined prompt triggers (e.g. 'alert if person comes in frame', 'alert if fan comes to the frame').
     """
     sensor_summary = ""
     if context:
@@ -92,66 +93,105 @@ def _build_prompt(user_goal: str, context: dict) -> str:
         if "gas_level" in context:
             parts.append(f"Gas/Smoke: {context['gas_level']} ppm")
         if "motion_detected" in context:
-            parts.append(f"PIR Motion Sensor: {'Triggered' if context['motion_detected'] else 'Idle'}")
+            parts.append(f"PIR Motion: {'Triggered' if context['motion_detected'] else 'Idle'}")
         if parts:
-            sensor_summary = "Live sensor readings from Arduino:\n" + "\n".join(parts) + "\n\n"
+            sensor_summary = "Live sensor context from Arduino:\n" + "\n".join(parts) + "\n\n"
 
-    return f"""You are OmniSense AI, an intelligent multi-modal monitoring assistant.
+    return f"""You are OmniSense AI, an intelligent real-time computer vision alert engine.
 
-Monitoring goal set by the operator:
+USER DIRECTIVE & ALERT CONDITION:
 \"{user_goal}\"
 
-{sensor_summary}Analyze the provided camera frame carefully.
+{sensor_summary}INSTRUCTIONS:
+1. Examine the user directive carefully. Determine what specific condition, person, object, action, or event triggers an alert:
+   - e.g. "alert if any person comes in frame" -> Condition: Presence of any human in view.
+   - e.g. "alert if fan comes to the frame" -> Condition: Presence or appearance of a fan.
+   - e.g. "alert if fan is moving" -> Condition: A fan with spinning or moving blades.
+   - e.g. "alert if someone stands up / looks sideways" -> Condition: That specific posture or gesture.
+   - e.g. "alert if smoke or gas occurs" -> Condition: Visible smoke, flame, or elevated sensor readings.
 
-Respond ONLY with a valid JSON object in this exact format (no markdown, no preamble):
+2. Inspect the camera frame right now. Does the image CURRENTLY exhibit this trigger condition?
+   - If YES (the condition is observed in the frame):
+     * "incident_detected": true
+     * "action_required": "alert" (or "alarm" if dangerous hazard like fire/weapon/injury)
+     * "explanation": A clear, concise sentence stating what triggered the alert (e.g., "Person detected entering the camera frame", "Ceiling fan observed in the scene").
+     * "boxes": Bounding box(es) around the exact object(s) or person(s) that caused the alert.
+   - If NO (the condition is NOT observed in the frame):
+     * "incident_detected": false
+     * "action_required": "none"
+     * "explanation": A brief note that the scene is clear (e.g., "No person observed in frame", "No fan detected").
+     * "boxes": Bounding box(es) of any other prominent objects if relevant, or empty list [].
+
+OUTPUT FORMAT:
+Respond ONLY with a valid JSON object (no markdown, no preamble):
 {{
   "incident_detected": true or false,
   "confidence": 0.0 to 1.0,
-  "explanation": "clear one-sentence description of what you observed",
+  "explanation": "concise description of why alert was triggered or why scene is clear",
   "action_required": "none" or "alert" or "alarm" or "log",
   "metrics": {{
-    "key": value
-  }}
+    "target_detected": true or false,
+    "target_name": "name of target object/event",
+    "status": "clear or alerting"
+  }},
+  "boxes": [
+    {{
+      "label": "target label (e.g. fan, person, stove)",
+      "box_2d": [ymin, xmin, ymax, xmax]
+    }}
+  ]
 }}
 
 Rules:
-- "metrics" must contain only the most relevant observable data points for the goal (e.g. person_count, risk_score, temperature_status, description).
-- If the scene is calm and matches what is expected, set incident_detected: false and action_required: "none".
-- If something violates the monitoring goal, set incident_detected: true.
-- "alarm" is only for critical physical danger (fire, violence, medical emergency).
-- "alert" is for policy violations (cheating, unauthorized presence, threshold exceeded).
-- "log" is for data collection only with no immediate urgency.
-- NEVER mention or attempt to identify specific people's faces or personal identities.
+- Coordinates [ymin, xmin, ymax, xmax] MUST be normalized integers between 0 and 1000.
+- "action_required": use "alarm" ONLY for life safety hazards (fire, brandished weapons, medical emergency); use "alert" for all other prompt conditions.
+- NEVER mention or attempt to identify personal identities or faces.
 """
 
 
 def _call_gemini(frame: np.ndarray, user_goal: str, context: dict) -> ReasonerResult:
-    """Call Gemini 2.0 Flash vision API."""
+    """Call Google GenAI Vision API (gemini-3.5-flash-lite / gemini-3.8-flash)."""
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
+        from google import genai
+        from google.genai import types
 
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-        img_b64 = _encode_frame_b64(frame)
+        # Encode frame to JPEG
+        _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        image_part = types.Part.from_bytes(data=buffer.tobytes(), mime_type="image/jpeg")
+
         prompt = _build_prompt(user_goal, context)
 
         t0 = time.time()
-        response = model.generate_content([
-            {"mime_type": "image/jpeg", "data": img_b64},
-            prompt,
-        ])
+        # Try gemini-3.5-flash-lite, fallback to gemini-3.8-flash
+        model_names = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+        response = None
+        for m in model_names:
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=[image_part, prompt]
+                )
+                if response and response.text:
+                    break
+            except Exception as me:
+                logger.warning(f"Gemini model {m} attempt failed: {me}")
+
+        if not response or not response.text:
+            return _offline_fallback(frame, user_goal, context)
+
         latency_ms = (time.time() - t0) * 1000
 
-        raw = response.text.strip()
-        # Strip markdown code fences if model wraps response
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
+        # Robust regex-based JSON extraction (handles markdown or preambles)
+        match = re.search(r"\{.*\}", response.text, re.DOTALL)
+        if match:
+            raw = match.group(0)
+        else:
+            raw = response.text.strip()
 
         data = json.loads(raw)
+        raw_boxes = data.get("boxes", [])
         return ReasonerResult(
             incident_detected=bool(data.get("incident_detected", False)),
             confidence=float(data.get("confidence", 0.5)),
@@ -159,6 +199,7 @@ def _call_gemini(frame: np.ndarray, user_goal: str, context: dict) -> ReasonerRe
             action_required=str(data.get("action_required", "none")),
             metrics=dict(data.get("metrics", {})),
             latency_ms=latency_ms,
+            boxes=raw_boxes if isinstance(raw_boxes, list) else [],
         )
 
     except json.JSONDecodeError as e:
@@ -176,29 +217,32 @@ def _call_gemini(frame: np.ndarray, user_goal: str, context: dict) -> ReasonerRe
 def _offline_fallback(frame: np.ndarray, user_goal: str, context: dict) -> ReasonerResult:
     """
     Heuristic offline reasoner when no Gemini API key is configured.
-    Uses basic computer vision signals to produce a best-effort result.
+    Uses basic computer vision signals and prompt matching to evaluate alerts.
     """
-    from backend.vision.detector import PersonDetector
+    boxes = []
+    try:
+        from backend.vision.detector import PersonDetector
+        detector = PersonDetector.get_instance()
+        boxes = detector.detect(frame)
+    except Exception as de:
+        logger.debug(f"PersonDetector offline unavailable: {de}")
 
-    detector = PersonDetector.get_instance()
-    boxes = detector.detect(frame)
     person_count = len(boxes)
 
-    # Simple heuristic: combine sensor context + person count
     gas = context.get("gas_level", 0)
     temp = context.get("temperature", 25)
     motion = context.get("motion_detected", False)
 
     incident = False
-    action = "log"
-    explanation = f"Offline mode: {person_count} person(s) detected in frame."
-    confidence = 0.6
+    action = "none"
+    explanation = f"Offline mode: Monitoring '{user_goal}'."
+    confidence = 0.70
 
     goal_lower = user_goal.lower()
 
-    # Crowd / headcount goals
-    if any(w in goal_lower for w in ["people", "crowd", "count", "person", "headcount"]):
-        limit = 4
+    # 1. Person / headcount / presence directive
+    if any(w in goal_lower for w in ["person", "people", "someone", "anyone", "human", "crowd", "man", "woman"]):
+        limit = 0 if any(w in goal_lower for w in ["any", "a person", "someone", "comes", "enters"]) else 4
         for w in goal_lower.split():
             if w.isdigit():
                 limit = int(w)
@@ -206,11 +250,23 @@ def _offline_fallback(frame: np.ndarray, user_goal: str, context: dict) -> Reaso
         if person_count > limit:
             incident = True
             action = "alert"
-            explanation = f"Offline: {person_count} people detected, exceeding limit of {limit}."
-            confidence = 0.78
+            explanation = f"Offline: {person_count} person(s) detected in frame matching directive '{user_goal}'."
+            confidence = 0.85
+        else:
+            explanation = f"Offline: No unauthorized persons detected (count: {person_count}, limit: {limit})."
 
-    # Environmental / hazard goals
-    if any(w in goal_lower for w in ["gas", "smoke", "fire", "leak", "temperature", "heat"]):
+    # 2. Fan / motion / movement directive
+    elif any(w in goal_lower for w in ["fan", "motion", "move", "moving", "active", "movement"]):
+        if motion:
+            incident = True
+            action = "alert"
+            explanation = f"Offline: Active movement/motion detected matching directive '{user_goal}'."
+            confidence = 0.80
+        else:
+            explanation = f"Offline: Scene is idle, no motion detected for directive '{user_goal}'."
+
+    # 3. Environmental / hazard directive
+    elif any(w in goal_lower for w in ["gas", "smoke", "fire", "leak", "temperature", "heat"]):
         if gas > 400:
             incident = True
             action = "alarm"
@@ -222,13 +278,22 @@ def _offline_fallback(frame: np.ndarray, user_goal: str, context: dict) -> Reaso
             explanation = f"Offline: Temperature {temp}°C is elevated."
             confidence = 0.80
 
-    # Security / intrusion goals
-    if any(w in goal_lower for w in ["restricted", "intrusion", "trespass", "unauthorized", "zone"]):
+    # 4. Security / intrusion directive
+    elif any(w in goal_lower for w in ["restricted", "intrusion", "trespass", "unauthorized", "zone"]):
         if person_count > 0:
             incident = True
             action = "alert"
             explanation = f"Offline: {person_count} person(s) detected in monitored area."
-            confidence = 0.70
+            confidence = 0.75
+
+    h, w = frame.shape[:2]
+    formatted_boxes = []
+    for b in boxes:
+        ymin = max(0, min(1000, int(b.y1 * 1000 / h)))
+        xmin = max(0, min(1000, int(b.x1 * 1000 / w)))
+        ymax = max(0, min(1000, int(b.y2 * 1000 / h)))
+        xmax = max(0, min(1000, int(b.x2 * 1000 / w)))
+        formatted_boxes.append({"label": "person", "box_2d": [ymin, xmin, ymax, xmax]})
 
     return ReasonerResult(
         incident_detected=incident,
@@ -241,6 +306,7 @@ def _offline_fallback(frame: np.ndarray, user_goal: str, context: dict) -> Reaso
             "gas_level": gas,
             "motion_sensor": motion,
         },
+        boxes=formatted_boxes,
     )
 
 

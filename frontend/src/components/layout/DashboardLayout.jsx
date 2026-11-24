@@ -9,6 +9,7 @@ export const DashboardLayout = () => {
   const { addToast } = useToast();
   const [systemStatus, setSystemStatus] = useState('operational');
   const [openEventsCount, setOpenEventsCount] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
     // Start WebSocket connection
@@ -37,12 +38,17 @@ export const DashboardLayout = () => {
   }, [addToast]);
 
   return (
-    <div className="min-h-screen bg-dark-950 flex flex-col font-sans">
-      <Navbar systemStatus={systemStatus} openEventsCount={openEventsCount} />
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
+      <Navbar
+        systemStatus={systemStatus}
+        openEventsCount={openEventsCount}
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
+      />
       <div className="flex-1 flex overflow-hidden">
-        <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6 md:p-8">
-          <div className="max-w-7xl mx-auto">
+        <Sidebar isOpen={sidebarOpen} />
+        <main className="flex-1 overflow-y-auto p-6 md:p-8 transition-all duration-300">
+          <div className="max-w-[1600px] mx-auto">
             <Outlet context={{ systemStatus, setSystemStatus }} />
           </div>
         </main>

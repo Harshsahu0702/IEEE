@@ -168,6 +168,7 @@ class CameraStream:
             if self._cap is not None and self._cap.isOpened():
                 ret, frame = self._cap.read()
                 if ret and frame is not None:
+                    frame = cv2.flip(frame, 1)  # Horizontal mirror (side-wise inversion)
                     if self.rotation == 90:
                         frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
                     elif self.rotation == 180:

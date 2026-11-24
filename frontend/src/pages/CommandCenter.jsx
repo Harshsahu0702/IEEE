@@ -57,12 +57,12 @@ export const CommandCenter = () => {
   const [changingPassword, setChangingPassword] = useState(false);
 
   const exampleChips = [
+    "Alert if any person comes in frame",
+    "Alert if fan comes to the frame",
+    "Monitor if fan is moving or stopped",
     "Watch for exam cheating — alert if students look sideways or talk",
     "Detect falls or elderly accidents in the room",
-    "Monitor kitchen for unattended cooking or smoke",
-    "Alert if someone enters restricted zone or trespasses",
-    "Monitor this camera for crowd density limit 5 people",
-    "Check temperature and gas leak risk on sensor 1",
+    "Alert if someone enters restricted zone",
     "stop monitoring"
   ];
 

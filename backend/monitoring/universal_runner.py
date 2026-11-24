@@ -64,6 +64,7 @@ class UniversalMonitorRunner:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._vlm_in_flight = False
 
         # Tunable parameters (from config or defaults)
         self.target_fps: float = float(config.get("target_fps", 10.0))
@@ -78,6 +79,7 @@ class UniversalMonitorRunner:
         self._last_incident_time: float = 0.0
         self._frame_counter: int = 0
         self._latest_annotated: Optional[np.ndarray] = None
+        self._last_result: Optional[ReasonerResult] = None
         self._last_metrics: dict = {}
 
     # ------------------------------------------------------------------
@@ -122,39 +124,59 @@ class UniversalMonitorRunner:
                 continue
 
             self._frame_counter += 1
-            motion_detected, motion_score = self._motion_filter.detect(frame)
+            motion_detected, motion_score, motion_boxes = self._motion_filter.detect(frame)
 
-            # Decide whether to call VLM this frame
+            # Decide whether to call VLM this frame (non-blocking background thread)
             should_reason = (
-                motion_detected
-                and self._frame_counter % self.vlm_every_n_frames == 0
+                not self._vlm_in_flight
+                and (
+                    self._frame_counter == 1
+                    or (motion_detected and self._frame_counter % self.vlm_every_n_frames == 0)
+                    or (self._frame_counter % 50 == 0)
+                )
             )
 
-            result: Optional[ReasonerResult] = None
             if should_reason:
-                sensor_ctx = self._get_sensor_context()
-                result = self._reasoner.reason(frame, self.user_goal, sensor_ctx)
-                self._last_metrics = result.metrics
-                self._last_metrics["motion_score"] = round(motion_score, 3)
-                self._last_metrics["vlm_latency_ms"] = round(result.latency_ms, 1)
+                self._vlm_in_flight = True
+                frame_copy = frame.copy()
+                threading.Thread(
+                    target=self._run_vlm_background,
+                    args=(frame_copy, motion_score),
+                    daemon=True,
+                ).start()
 
-                if result.incident_detected:
-                    self._handle_incident(frame, result)
-
-            # Always annotate and stream frame
-            annotated = self._annotate_frame(frame, result, motion_score)
+            # Always annotate and stream frame at full FPS (real-time motion boxes + cached AI target boxes)
+            annotated = self._annotate_frame(frame, self._last_result, motion_score, motion_boxes)
             with self._lock:
                 self._latest_annotated = annotated
 
             # Broadcast live metrics via WebSocket
             if self._frame_counter % 5 == 0:
-                asyncio.run(self._broadcast_metrics(result))
+                asyncio.run(self._broadcast_metrics(self._last_result))
 
             # Sleep to maintain target FPS
             elapsed = time.time() - loop_start
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+    def _run_vlm_background(self, frame: np.ndarray, motion_score: float):
+        """Run VLM reasoning and incident handling off the video frame loop."""
+        try:
+            sensor_ctx = self._get_sensor_context()
+            result = self._reasoner.reason(frame, self.user_goal, sensor_ctx)
+            self._last_result = result
+            self._last_metrics = result.metrics
+            self._last_metrics["motion_score"] = round(motion_score, 3)
+            self._last_metrics["vlm_latency_ms"] = round(result.latency_ms, 1)
+
+            if result.incident_detected:
+                self._handle_incident(frame, result)
+                asyncio.run(self._broadcast_metrics(result))
+        except Exception as e:
+            logger.error(f"[Task {self.task_id}] Background VLM error: {e}")
+        finally:
+            self._vlm_in_flight = False
 
     # ------------------------------------------------------------------
     # Incident handling
@@ -176,6 +198,23 @@ class UniversalMonitorRunner:
         # Trigger Arduino alarm if physical danger
         if result.action_required == "alarm":
             self._trigger_hardware_alarm()
+
+        # Broadcast event_alert over WebSocket for instant toast notification across the whole app
+        try:
+            alert_payload = {
+                "type": "event_alert",
+                "event": {
+                    "id": self.task_id,
+                    "event_type": f"prompt_{result.action_required}",
+                    "severity": "critical" if result.action_required == "alarm" else "high",
+                    "description": result.explanation,
+                    "confidence": result.confidence,
+                    "evidence_screenshot_path": evidence_path,
+                }
+            }
+            asyncio.run(dashboard_ws_manager.broadcast(alert_payload))
+        except Exception as e:
+            logger.debug(f"Failed to broadcast event_alert: {e}")
 
         logger.warning(
             f"[Task {self.task_id}] INCIDENT [{result.action_required.upper()}]: "
@@ -236,27 +275,81 @@ class UniversalMonitorRunner:
     # ------------------------------------------------------------------
 
     def _annotate_frame(
-        self, frame: np.ndarray, result: Optional[ReasonerResult], motion_score: float
-    ) -> np.ndarray:
+        self, frame, result, motion_score, motion_boxes=None
+    ):
         annotated = frame.copy()
         h, w = annotated.shape[:2]
 
-        # Status bar at top
-        status_color = (0, 200, 0)   # Green default
-        status_text = "MONITORING"
+        # 1. Real-time Motion Bounding Boxes (Layer 1 - 10 FPS)
+        if motion_boxes:
+            for bx1, by1, bx2, by2 in motion_boxes:
+                cv2.rectangle(annotated, (bx1, by1), (bx2, by2), (255, 200, 0), 2)
+                cv2.putText(
+                    annotated,
+                    "MOTION",
+                    (bx1 + 2, max(14, by1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.38,
+                    (255, 200, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        # 2. AI Target Object Bounding Boxes (Layer 2 - VLM Grounding)
+        if result and getattr(result, "boxes", None):
+            for b in result.boxes:
+                coords = b.get("box_2d", [])
+                if len(coords) == 4:
+                    ymin, xmin, ymax, xmax = coords
+                    x1 = max(0, min(w - 1, int(xmin * w / 1000)))
+                    y1 = max(0, min(h - 1, int(ymin * h / 1000)))
+                    x2 = max(0, min(w - 1, int(xmax * w / 1000)))
+                    y2 = max(0, min(h - 1, int(ymax * h / 1000)))
+
+                    is_alert = result.incident_detected or result.action_required in ["alert", "alarm"]
+                    box_color = (0, 0, 220) if is_alert else (0, 220, 100)
+                    label = str(b.get("label", "TARGET")).upper()
+
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2)
+                    c_len = min(16, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
+                    cv2.line(annotated, (x1, y1), (x1 + c_len, y1), box_color, 3)
+                    cv2.line(annotated, (x1, y1), (x1, y1 + c_len), box_color, 3)
+                    cv2.line(annotated, (x2, y1), (x2 - c_len, y1), box_color, 3)
+                    cv2.line(annotated, (x2, y1), (x2, y1 + c_len), box_color, 3)
+                    cv2.line(annotated, (x1, y2), (x1 + c_len, y2), box_color, 3)
+                    cv2.line(annotated, (x1, y2), (x1, y2 - c_len), box_color, 3)
+                    cv2.line(annotated, (x2, y2), (x2 - c_len, y2), box_color, 3)
+                    cv2.line(annotated, (x2, y2), (x2, y2 - c_len), box_color, 3)
+
+                    tag = f"{label} ({result.confidence:.0%})"
+                    (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+                    badge_y1 = max(0, y1 - th - 6)
+                    cv2.rectangle(annotated, (x1, badge_y1), (x1 + tw + 6, y1), box_color, -1)
+                    cv2.putText(
+                        annotated,
+                        tag,
+                        (x1 + 3, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.42,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+
+        # 3. Status bar at top
+        status_color = (0, 200, 0)
+        status_text = "MONITORING ACTIVE"
         if result and result.incident_detected:
             status_color = (0, 0, 220) if result.action_required == "alarm" else (0, 140, 255)
-            status_text = f"⚠ {result.action_required.upper()}: {result.explanation[:60]}"
+            status_text = f"ALERT: {result.action_required.upper()} - {result.explanation[:60]}"
 
         cv2.rectangle(annotated, (0, 0), (w, 36), (20, 20, 20), -1)
         cv2.putText(annotated, status_text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, status_color, 1, cv2.LINE_AA)
 
-        # Motion indicator bottom-right
         motion_pct = int(motion_score * 100)
         motion_label = f"Motion: {motion_pct}%"
         cv2.putText(annotated, motion_label, (w - 140, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1, cv2.LINE_AA)
 
-        # Confidence badge if VLM fired
         if result:
             conf_label = f"AI Confidence: {result.confidence:.0%}"
             cv2.putText(annotated, conf_label, (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 220, 100), 1, cv2.LINE_AA)
@@ -269,16 +362,18 @@ class UniversalMonitorRunner:
 
     async def _broadcast_metrics(self, result: Optional[ReasonerResult]):
         sensor_ctx = self._get_sensor_context()
+        active_res = result or self._last_result
         payload = {
             "type": "universal_monitor_update",
             "task_id": self.task_id,
             "goal": self.user_goal,
             "timestamp": datetime.now(UTC).isoformat(),
             "motion_score": round(self._motion_filter.last_motion_score, 3),
-            "incident_detected": result.incident_detected if result else False,
-            "confidence": result.confidence if result else 0.0,
-            "explanation": result.explanation if result else "",
-            "action_required": result.action_required if result else "none",
+            "incident_detected": active_res.incident_detected if active_res else False,
+            "confidence": active_res.confidence if active_res else 0.0,
+            "explanation": active_res.explanation if active_res else "",
+            "action_required": active_res.action_required if active_res else "none",
+            "boxes": getattr(active_res, "boxes", []) if active_res else [],
             # Dynamic metrics for the adaptive UI
             "metrics": {**self._last_metrics, **sensor_ctx},
             # Context hint for the UI: tells frontend WHICH widgets to render

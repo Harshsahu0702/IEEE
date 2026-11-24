@@ -12,7 +12,7 @@ import {
   Settings
 } from 'lucide-react';
 
-export const Sidebar = () => {
+export const Sidebar = ({ isOpen = true }) => {
   const { isAdmin } = useAuth();
 
   const links = [
@@ -28,7 +28,14 @@ export const Sidebar = () => {
 
 
   return (
-    <aside className="w-64 border-r border-dark-800 bg-dark-900/90 flex flex-col justify-between py-6 px-3 shrink-0">
+    <aside
+      className={`border-slate-200 bg-white flex flex-col justify-between shrink-0 shadow-sm transition-all duration-300 ease-in-out ${
+        isOpen
+          ? 'w-64 border-r py-6 px-3 opacity-100'
+          : 'w-0 border-r-0 py-6 px-0 opacity-0 overflow-hidden pointer-events-none'
+      }`}
+      aria-hidden={!isOpen}
+    >
       <div className="space-y-6">
         <div className="px-3">
           <p className="text-[10px] font-mono font-semibold uppercase tracking-wider text-slate-400">
@@ -47,15 +54,15 @@ export const Sidebar = () => {
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-medium transition-all ${
                     isActive
-                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-sm shadow-emerald-950'
-                      : 'text-slate-400 hover:text-slate-200 hover:bg-dark-800'
-                  } ${link.highlight && !link.isActive ? 'ring-1 ring-cyan-500/20 text-cyan-300' : ''}`
+                      ? 'bg-slate-900 text-white shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  } ${link.highlight && !link.isActive ? 'ring-1 ring-emerald-500/30 text-emerald-700 bg-emerald-50/50' : ''}`
                 }
               >
                 <Icon className="w-4 h-4 shrink-0" />
                 <span>{link.label}</span>
                 {link.highlight && (
-                  <span className="ml-auto text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300">
+                  <span className="ml-auto text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold">
                     CORE
                   </span>
                 )}
@@ -66,16 +73,16 @@ export const Sidebar = () => {
       </div>
 
       {/* System Integrity Chip */}
-      <div className="p-3.5 rounded-xl border border-dark-800 bg-dark-850/60 text-[11px] font-mono space-y-1 text-slate-400">
-        <div className="flex items-center justify-between text-slate-300">
+      <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50 text-[11px] font-mono space-y-1 text-slate-500">
+        <div className="flex items-center justify-between text-slate-700">
           <span>AI Engine</span>
-          <span className="text-emerald-400 font-bold">YOLOv8n</span>
+          <span className="text-emerald-700 font-bold">Universal VLM</span>
         </div>
-        <div className="flex items-center justify-between text-slate-300">
+        <div className="flex items-center justify-between text-slate-700">
           <span>Broker</span>
-          <span className="text-cyan-400 font-bold">Mosquitto</span>
+          <span className="text-indigo-600 font-bold">MQTT Live</span>
         </div>
-        <p className="text-[9px] text-slate-400 pt-1 border-t border-dark-800">Privacy rule: No biometric ID</p>
+        <p className="text-[9px] text-slate-400 pt-1 border-t border-slate-200">Privacy rule: No biometric ID</p>
       </div>
     </aside>
   );
