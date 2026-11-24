@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database & Evidence
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db.corrupt
+evidence/
+reports/*.pdf
+reports/*.csv
+
+# Environment & Models
+.env
+*.pt
+.DS_Store
+Thumbs.db

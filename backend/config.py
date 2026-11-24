@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # App Settings
     ENVIRONMENT: str = "development"
-    DEBUG: bool = True
+    DEBUG: bool | str = True
     PROJECT_NAME: str = "OmniSense AI"
     API_V1_STR: str = "/api"
 
