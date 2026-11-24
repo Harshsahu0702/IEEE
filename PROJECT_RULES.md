@@ -31,9 +31,9 @@ The user should be able to specify **ANY real-world monitoring scenario** in nat
 - **Backend Infrastructure** (`backend/api/`, `backend/database/`): SQLite models, WebSocket broadcasting, JWT auth, evidence archiving.
 - **Physical IoT & Edge Layer** (`backend/iot/`, `firmware/`): Real Arduino USB Serial bridge (`run_arduino_bridge.py`), environmental sensors (DHT22, MQ-2, PIR), hardware strobe/buzzer alarms.
 
-### C. What to Deprecate / Replace
-- Deprecate rigid rule-based monitoring folders (`backend/monitoring/crowd`, `backend/monitoring/security`, `backend/monitoring/threat`).
-- Replace them with a single **Universal VLM Reasoning Monitor** that handles arbitrary user prompts.
+### C. What Was Deprecated & Removed
+- Removed rigid rule-based monitoring folders (`backend/monitoring/crowd`, `backend/monitoring/security`, `backend/monitoring/threat`).
+- Replaced them with the **Universal VLM Reasoning Monitor** (`backend/monitoring/universal/`) that handles arbitrary user prompts using MotionFilter + VLMReasoner.
 
 ---
 

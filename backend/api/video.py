@@ -62,7 +62,18 @@ async def mjpeg_frame_generator(max_frames: Optional[int] = None):
             break
 
         try:
-            frame = task_manager.get_latest_vision_frame()
+            from backend.monitoring import universal_runner
+            frame = universal_runner.get_latest_vision_frame()
+            if frame is None:
+                try:
+                    frame = task_manager.get_latest_vision_frame()
+                except Exception:
+                    frame = None
+            if frame is None:
+                ok, raw_frame = camera_stream.get_frame()
+                if ok and raw_frame is not None:
+                    frame = raw_frame
+
             if frame is not None:
                 ret, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if ret:

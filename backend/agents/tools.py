@@ -83,11 +83,12 @@ class RegisteredTools:
                 return {"success": False, "error": f"Task #{task_id} not found"}
 
             crud.update_task_status(db, task_id, "running")
-            task_manager.start_task(
+            user_goal = (task.config or {}).get("user_goal", "Monitor scene")
+            from backend.monitoring import universal_runner
+            universal_runner.start_universal_task(
                 task_id=task.id,
-                plugin_name=task.plugin_name,
-                target_source=task.target_source,
-                config=task.config or {}
+                user_goal=user_goal,
+                config=task.config or {},
             )
             return {"success": True, "task_id": task_id, "status": "running"}
         finally:
@@ -102,7 +103,8 @@ class RegisteredTools:
             if not task:
                 return {"success": False, "error": f"Task #{task_id} not found"}
 
-            task_manager.stop_task(task_id)
+            from backend.monitoring import universal_runner
+            universal_runner.stop_universal_task(task_id)
             crud.update_task_status(db, task_id, "stopped")
             return {"success": True, "task_id": task_id, "status": "stopped"}
         finally:

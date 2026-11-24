@@ -7,7 +7,7 @@ from backend.database.connection import get_db
 from backend.database import crud
 from backend.database.models import User, AgentPlan
 from backend.api.auth import get_current_user
-from backend.monitoring.runner import task_manager
+from backend.monitoring import universal_runner
 from backend.agents.master_agent import master_agent
 from backend.agents.schemas import CommandResponse, PlanExplanation
 from backend.agents.scheduler import duration_scheduler
@@ -118,41 +118,43 @@ def approve_plan(
         if plan.intent == "switch_monitoring":
             active_tasks = [t for t in crud.get_tasks(db) if t.status == "running"]
             for active in active_tasks:
-                task_manager.stop_task(active.id)
+                universal_runner.stop_universal_task(active.id)
                 crud.update_task_status(db, active.id, "stopped", error_message="Stopped via switch_monitoring plan.")
 
         # Handle stop_monitoring
         if plan.intent == "stop_monitoring":
             active_tasks = [t for t in crud.get_tasks(db) if t.status == "running"]
             for active in active_tasks:
-                task_manager.stop_task(active.id)
+                universal_runner.stop_universal_task(active.id)
                 crud.update_task_status(db, active.id, "stopped", error_message="Stopped by approved operator plan.")
             return updated_plan
 
-        # Start monitoring tasks for each module in plan
-        modules = plan.modules or ["crowd_monitoring"]
+        # Start universal monitoring task with the operator's natural language command as goal
         duration_minutes = (plan.rules or {}).get("duration_minutes")
+        user_goal = plan.natural_command  # Pass the original command as the monitoring goal
 
-        for module_name in modules:
-            task = crud.create_task(
-                db=db,
-                plugin_name=module_name,
-                target_source=plan.source,
-                config=plan.rules or {},
-                plan_id=plan.id,
-                status="running"
-            )
-            # Launch active worker
-            task_manager.start_task(
-                task_id=task.id,
-                plugin_name=task.plugin_name,
-                target_source=task.target_source,
-                config=task.config
-            )
+        task_config = {
+            **(plan.rules or {}),
+            "user_goal": user_goal,
+        }
+        task = crud.create_task(
+            db=db,
+            plugin_name="universal_vlm_monitor",
+            target_source=plan.source,
+            config=task_config,
+            plan_id=plan.id,
+            status="running",
+        )
+        # Launch Universal VLM Monitor runner
+        universal_runner.start_universal_task(
+            task_id=task.id,
+            user_goal=user_goal,
+            config=task_config,
+        )
 
-            # Schedule auto-stop timer if duration was specified
-            if duration_minutes and int(duration_minutes) > 0:
-                duration_scheduler.schedule_auto_stop(task.id, int(duration_minutes))
+        # Schedule auto-stop if duration was specified
+        if duration_minutes and int(duration_minutes) > 0:
+            duration_scheduler.schedule_auto_stop(task.id, int(duration_minutes))
 
     return updated_plan
 

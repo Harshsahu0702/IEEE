@@ -32,7 +32,12 @@ class TaskDurationScheduler:
 
         def _stop():
             logger.info(f"Duration expired for task #{task_id}. Stopping task automatically...")
-            task_manager.stop_task(task_id)
+            from backend.monitoring import universal_runner
+            universal_runner.stop_universal_task(task_id)
+            try:
+                task_manager.stop_task(task_id)
+            except Exception:
+                pass
             db = SessionLocal()
             try:
                 crud.update_task_status(db, task_id, "stopped", error_message=f"Stopped automatically after {duration_minutes}m duration.")

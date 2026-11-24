@@ -35,9 +35,15 @@ import {
   ReferenceLine
 } from 'recharts';
 
+import AdaptiveMonitorPanel from '../components/monitoring/AdaptiveMonitorPanel';
+
 export const LiveMonitoring = () => {
   const { addToast } = useToast();
   const [videoSrc, setVideoSrc] = useState(api.getVideoStreamUrl());
+  // Universal monitor WS state
+  const [universalMonitorData, setUniversalMonitorData] = useState(null);
+  const [activeGoal, setActiveGoal] = useState('');
+
   const [streamError, setStreamError] = useState(false);
   const [wsStatus, setWsStatus] = useState('disconnected');
 
@@ -165,6 +171,14 @@ export const LiveMonitoring = () => {
           fps: payload.fps,
           timestamp: Date.now()
         });
+      } else if (payload.type === 'universal_monitor_update') {
+        // Universal VLM Monitor — feeds AdaptiveMonitorPanel
+        setUniversalMonitorData(payload);
+        if (payload.goal) setActiveGoal(payload.goal);
+        // Trigger alarm if physical danger
+        if (payload.action_required === 'alarm' && payload.incident_detected) {
+          triggerAlarm(payload.explanation || 'CRITICAL: Anomaly detected by AI monitor!', 'universal_threat');
+        }
       } else if (payload.type === 'telemetry_update') {
         const t = payload.telemetry;
         setCurrentTelemetry(t);
@@ -600,6 +614,17 @@ export const LiveMonitoring = () => {
         </div>
       </div>
 
+
+      {/* =====================================================
+          ADAPTIVE MONITORING PANEL
+          Renders dynamically based on the active monitoring goal.
+          Replaces the need for hardcoded static charts.
+          ===================================================== */}
+      {universalMonitorData ? (
+        <AdaptiveMonitorPanel wsData={universalMonitorData} goal={activeGoal} />
+      ) : (
+        /* Legacy static charts — shown only when no universal monitor is active */
+      <>
       {/* Real-time Recharts Line Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Temperature Trend */}
@@ -654,6 +679,8 @@ export const LiveMonitoring = () => {
           </div>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 };

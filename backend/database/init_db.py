@@ -89,17 +89,15 @@ def init_database():
         # 4. Seed Builtin Monitoring Profiles
         builtin_profiles = [
             {
-                "name": "Crowd Safety Mode",
-                "description": "Monitors high-density pedestrian gathering, spatial occupancy, and overcrowding conditions.",
+                "name": "Universal AI Watchdog",
+                "description": "General AI monitoring using vision-language reasoning and motion detection for any active scene.",
                 "domain": "vision",
-                "modules": ["crowd_monitoring"],
+                "modules": ["universal_vlm_monitor"],
                 "source": "webcam_0",
                 "rules": {
-                    "person_threshold": 4,
-                    "density_low_max": 2,
-                    "density_medium_max": 5,
-                    "cooldown_seconds": 30.0,
-                    "confidence_threshold": 0.35
+                    "user_goal": "Monitor for anomalous events, accidents, or safety hazards",
+                    "cooldown_seconds": 20.0,
+                    "confidence_threshold": 0.40
                 },
                 "duration_minutes": 60,
                 "is_builtin": True
@@ -120,18 +118,13 @@ def init_database():
                 "is_builtin": True
             },
             {
-                "name": "Restricted Area Mode",
-                "description": "Surveillance of critical physical perimeter zones for unauthorized human intrusion.",
+                "name": "Perimeter & Intrusion Guard",
+                "description": "Monitors entryways and boundary zones for unauthorized intrusion or trespassing.",
                 "domain": "vision",
-                "modules": ["security_monitoring"],
+                "modules": ["universal_vlm_monitor"],
                 "source": "webcam_0",
                 "rules": {
-                    "zones": [
-                        {
-                            "name": "Perimeter Zone A",
-                            "polygon": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
-                        }
-                    ],
+                    "user_goal": "Alert if anyone breaches the designated perimeter or unauthorized zone",
                     "cooldown_seconds": 20.0,
                     "confidence_threshold": 0.35
                 },

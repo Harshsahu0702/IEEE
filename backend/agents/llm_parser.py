@@ -93,9 +93,9 @@ JSON Schema:
 {{
   "intent": "start_monitoring",
   "domain": "vision",
-  "modules": ["crowd_monitoring"],
+  "modules": ["universal_vlm_monitor"],
   "source": "webcam_0",
-  "rules": {{"person_threshold": 5, "density_low_max": 2, "density_medium_max": 5}},
+  "rules": {{}},
   "duration_minutes": null,
   "notify": "dashboard",
   "what_i_understood": "Detailed plain English description of what was understood",

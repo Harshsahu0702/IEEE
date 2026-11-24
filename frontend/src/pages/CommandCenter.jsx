@@ -57,13 +57,12 @@ export const CommandCenter = () => {
   const [changingPassword, setChangingPassword] = useState(false);
 
   const exampleChips = [
-    "Monitor this camera for crowd density",
-    "Restricted area intrusion monitor karo",
-    "Check temperature and gas leak risk",
-    "Security monitoring on camera 1",
-    "limit 10 people for 45 minutes",
-    "gas leak check karo sensor 1 par",
-    "switch to environment monitoring",
+    "Watch for exam cheating — alert if students look sideways or talk",
+    "Detect falls or elderly accidents in the room",
+    "Monitor kitchen for unattended cooking or smoke",
+    "Alert if someone enters restricted zone or trespasses",
+    "Monitor this camera for crowd density limit 5 people",
+    "Check temperature and gas leak risk on sensor 1",
     "stop monitoring"
   ];
 
@@ -311,6 +310,7 @@ export const CommandCenter = () => {
             const isCrowd = p.modules?.includes('crowd_monitoring');
             const isEnv = p.modules?.includes('environment_monitoring');
             const isSecurity = p.modules?.includes('security_monitoring');
+            const isUniversal = p.modules?.includes('universal_vlm_monitor');
 
             return (
               <button
@@ -323,6 +323,7 @@ export const CommandCenter = () => {
                 <div>
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-xs text-slate-200 group-hover:text-indigo-300 transition">
+                      {isUniversal && '👁️ '}
                       {isCrowd && '🛡️ '}
                       {isEnv && '🔥 '}
                       {isSecurity && '🚨 '}

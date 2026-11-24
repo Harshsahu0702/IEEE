@@ -46,7 +46,12 @@ async def lifespan(app: FastAPI):
 
     # 5. Clean shutdown handlers
     mqtt_service.stop()
-    task_manager.stop_all()
+    from backend.monitoring import universal_runner
+    universal_runner.stop_all()
+    try:
+        task_manager.stop_all()
+    except Exception:
+        pass
 
 
 

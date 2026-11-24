@@ -105,9 +105,13 @@ class TelemetryHandler:
                 "approval_status": device.approval_status
             }
 
-            # 4. If approved, forward to any active environment monitoring plugins
+            # 4. If approved, update live sensor snapshot for VLM Reasoner and forward to any active plugins
             if is_approved:
-                task_manager.dispatch_sensor_data(result_dict)
+                _update_sensor_snapshot(result_dict)
+                try:
+                    task_manager.dispatch_sensor_data(result_dict)
+                except Exception:
+                    pass
             else:
                 logger.info(f"Telemetry recorded for pending device '{telemetry_data.device_id}' (not dispatched to alerts until approved).")
 
@@ -228,3 +232,27 @@ class TelemetryHandler:
 
 
 telemetry_handler = TelemetryHandler()
+
+
+# ---------------------------------------------------------------------------
+# Global latest sensor data cache (used by VLM Reasoner for context)
+# ---------------------------------------------------------------------------
+
+_latest_sensor_snapshot: dict = {}
+
+
+def _update_sensor_snapshot(data: dict):
+    """Called by TelemetryHandler when new data arrives from any approved device."""
+    global _latest_sensor_snapshot
+    _latest_sensor_snapshot = {
+        "temperature": data.get("temperature"),
+        "humidity": data.get("humidity"),
+        "gas_level": data.get("gas_level"),
+        "motion_detected": data.get("motion"),
+        "device_id": data.get("device_id"),
+    }
+
+
+def get_latest_sensor_data() -> dict:
+    """Return the most recently received sensor readings from any approved IoT device."""
+    return dict(_latest_sensor_snapshot)

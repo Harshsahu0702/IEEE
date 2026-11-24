@@ -130,19 +130,17 @@ class FallbackParser:
             return {
                 "intent": intent,
                 "domain": "vision",
-                "modules": ["threat_monitoring"],
+                "modules": ["universal_vlm_monitor"],
                 "source": source or "webcam_0",
                 "rules": {
-                    "weapon_detection": True,
-                    "violence_detection": True,
                     "cooldown_seconds": 15.0,
                     "confidence_threshold": 0.20,
                     "enable_hardware_alarm": True
                 },
                 "duration_minutes": duration_minutes,
                 "confidence": 0.95,
-                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} physical threat, weapon, and violence surveillance with alarm activation.",
-                "why": "Detected keywords for weapon threat, violence, fighting, or brandished hazard."
+                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} physical threat, weapon, or hazard monitoring via Universal AI Monitor.",
+                "why": "Detected keywords for hazard, violence, weapon, or brandished threat."
             }
 
         # If switching "from X to Y", identify destination module Y
@@ -164,42 +162,33 @@ class FallbackParser:
             return {
                 "intent": intent,
                 "domain": "vision",
-                "modules": ["security_monitoring"],
+                "modules": ["universal_vlm_monitor"],
                 "source": source or "webcam_0",
                 "rules": {
-                    "zones": [
-                        {
-                            "name": "Restricted Zone A",
-                            "polygon": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
-                        }
-                    ],
                     "cooldown_seconds": 20.0,
                     "confidence_threshold": 0.35
                 },
                 "duration_minutes": duration_minutes,
                 "confidence": 0.92,
-                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} restricted-area intrusion monitoring on camera with polygon boundary zone.",
+                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} perimeter security and intrusion monitoring via Universal AI Monitor.",
                 "why": "Detected keywords matching security monitoring, restricted zone, or intrusion surveillance."
             }
-
 
         if has_crowd and not has_env:
             threshold = person_threshold or 4
             return {
                 "intent": intent,
                 "domain": "vision",
-                "modules": ["crowd_monitoring"],
+                "modules": ["universal_vlm_monitor"],
                 "source": source or "webcam_0",
                 "rules": {
                     "person_threshold": threshold,
-                    "density_low_max": max(1, threshold // 2),
-                    "density_medium_max": threshold,
                     "cooldown_seconds": 30.0,
                     "confidence_threshold": 0.35
                 },
                 "duration_minutes": duration_minutes,
                 "confidence": 0.90,
-                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} crowd density monitoring on camera with person threshold {threshold}.",
+                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} crowd monitoring with person threshold {threshold} via Universal AI Monitor.",
                 "why": "Detected keywords matching visual crowd density and spatial occupancy."
             }
 
@@ -223,12 +212,12 @@ class FallbackParser:
                 "why": "Detected telemetry indicators for environmental gas or temperature monitoring."
             }
 
-        # Both or general
+        # Both or general multimodal
         if has_crowd and has_env:
             return {
                 "intent": intent,
                 "domain": "multimodal",
-                "modules": ["crowd_monitoring", "environment_monitoring"],
+                "modules": ["universal_vlm_monitor", "environment_monitoring"],
                 "source": "webcam_0",
                 "rules": {
                     "person_threshold": person_threshold or 4,
@@ -237,21 +226,21 @@ class FallbackParser:
                 },
                 "duration_minutes": duration_minutes,
                 "confidence": 0.85,
-                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} combined crowd and environmental monitoring.",
+                "what_i_understood": f"{'Switch to' if is_switch else 'Start'} multimodal visual and environmental monitoring via Universal AI Monitor.",
                 "why": "Command contains references to both optical vision and ambient environmental sensors."
             }
 
-        # Fallback default
+        # Universal fallback for any custom monitoring goal (e.g. "exam cheating", "home accidents", "fall detection")
         return {
             "intent": "start_monitoring",
             "domain": "vision",
-            "modules": ["crowd_monitoring"],
+            "modules": ["universal_vlm_monitor"],
             "source": "webcam_0",
-            "rules": {"person_threshold": 4},
+            "rules": {},
             "duration_minutes": duration_minutes,
-            "confidence": 0.60,
-            "what_i_understood": "Monitor general facility area for crowd activity.",
-            "why": "Defaulting to optical crowd monitoring as standard facility baseline."
+            "confidence": 0.85,
+            "what_i_understood": f"Monitor the scene for: '{command.strip()}'.",
+            "why": "Routing to Universal AI Vision-Language Monitor with dynamic context-adaptive reasoning."
         }
 
     def _extract_duration(self, text: str) -> Optional[int]:
