@@ -29,7 +29,8 @@ from backend.database.connection import SessionLocal
 from backend.database import crud
 from backend.vision.camera import camera_stream
 from backend.vision.motion_filter import MotionFilter
-from backend.vision.vlm_reasoner import VLMReasoner, ReasonerResult
+from backend.vision.vlm_reasoner import VLMReasoner, ReasonerResult, _parse_goal_directive, _label_matches_targets
+from backend.vision.detector import UniversalWorldDetector
 from backend.api.websocket import dashboard_ws_manager
 from backend.iot.telemetry import get_latest_sensor_data
 
@@ -65,21 +66,28 @@ class UniversalMonitorRunner:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._vlm_in_flight = False
+        self._world_in_flight = False
 
         # Tunable parameters (from config or defaults)
         self.target_fps: float = float(config.get("target_fps", 10.0))
-        self.vlm_every_n_frames: int = int(config.get("vlm_every_n_frames", 15))  # VLM called ~every 1.5s at 10fps
+        self.vlm_every_n_frames: int = int(config.get("vlm_every_n_frames", 15))
         self.cooldown_seconds: float = float(config.get("cooldown_seconds", 20.0))
 
         self._motion_filter = MotionFilter(
             min_area_ratio=float(config.get("motion_sensitivity", 0.005)),
         )
         self._reasoner = VLMReasoner.get_instance()
+        self._world_detector = UniversalWorldDetector.get_instance()
+
+        goal_spec = _parse_goal_directive(user_goal)
+        self._target_entities: list[str] = goal_spec["targets"]
+        self._requires_vlm: bool = goal_spec["requires_vlm"]
 
         self._last_incident_time: float = 0.0
         self._frame_counter: int = 0
         self._latest_annotated: Optional[np.ndarray] = None
         self._last_result: Optional[ReasonerResult] = None
+        self._live_boxes: list[dict] = []
         self._last_metrics: dict = {}
 
     # ------------------------------------------------------------------
@@ -126,33 +134,50 @@ class UniversalMonitorRunner:
             self._frame_counter += 1
             motion_detected, motion_score, motion_boxes = self._motion_filter.detect(frame)
 
-            # Decide whether to call VLM this frame (non-blocking background thread)
-            should_reason = (
-                not self._vlm_in_flight
-                and (
-                    self._frame_counter == 1
-                    or (motion_detected and self._frame_counter % self.vlm_every_n_frames == 0)
-                    or (self._frame_counter % 50 == 0)
+            # Tier 1 / Full Reasoner scheduling:
+            # - If goal is pure spatial/open-vocabulary (not requires_vlm), run continuously as fast as Tier 1 completes (~5-6 FPS)
+            # - If goal requires Tier 2 VLM (semantic action/state), keep Tier 1 live boxes running continuously in parallel
+            if not self._requires_vlm:
+                if not self._vlm_in_flight:
+                    self._vlm_in_flight = True
+                    threading.Thread(
+                        target=self._run_vlm_background,
+                        args=(frame.copy(), motion_score),
+                        daemon=True,
+                    ).start()
+            else:
+                if not self._world_in_flight:
+                    self._world_in_flight = True
+                    threading.Thread(
+                        target=self._run_live_boxes_background,
+                        args=(frame.copy(),),
+                        daemon=True,
+                    ).start()
+
+                should_reason = (
+                    not self._vlm_in_flight
+                    and (
+                        self._frame_counter == 1
+                        or (motion_detected and self._frame_counter % self.vlm_every_n_frames == 0)
+                        or (self._frame_counter % 50 == 0)
+                    )
                 )
-            )
+                if should_reason:
+                    self._vlm_in_flight = True
+                    threading.Thread(
+                        target=self._run_vlm_background,
+                        args=(frame.copy(), motion_score),
+                        daemon=True,
+                    ).start()
 
-            if should_reason:
-                self._vlm_in_flight = True
-                frame_copy = frame.copy()
-                threading.Thread(
-                    target=self._run_vlm_background,
-                    args=(frame_copy, motion_score),
-                    daemon=True,
-                ).start()
-
-            # Always annotate and stream frame at full FPS (real-time motion boxes + cached AI target boxes)
+            # Always annotate and stream frame at full FPS (live object boxes + red alert isolation)
             annotated = self._annotate_frame(frame, self._last_result, motion_score, motion_boxes)
             with self._lock:
                 self._latest_annotated = annotated
 
-            # Broadcast live metrics via WebSocket
+            # Broadcast live metrics via WebSocket (thread-safe)
             if self._frame_counter % 5 == 0:
-                asyncio.run(self._broadcast_metrics(self._last_result))
+                self._broadcast_metrics_sync(self._last_result)
 
             # Sleep to maintain target FPS
             elapsed = time.time() - loop_start
@@ -160,19 +185,48 @@ class UniversalMonitorRunner:
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+    def _run_live_boxes_background(self, frame: np.ndarray):
+        """Continuously update live open-vocabulary bounding boxes during Tier 2 VLM tasks."""
+        try:
+            detections, _, _ = self._world_detector.detect_all(
+                frame,
+                target_classes=self._target_entities if self._target_entities else None,
+            )
+            h, w = frame.shape[:2]
+            boxes = []
+            for d in detections:
+                ymin = max(0, min(1000, int(d.y1 * 1000 / h)))
+                xmin = max(0, min(1000, int(d.x1 * 1000 / w)))
+                ymax = max(0, min(1000, int(d.y2 * 1000 / h)))
+                xmax = max(0, min(1000, int(d.x2 * 1000 / w)))
+                is_target = _label_matches_targets(d.class_name, self._target_entities) if self._target_entities else False
+                boxes.append({
+                    "label": d.class_name,
+                    "confidence": d.confidence,
+                    "is_target": is_target,
+                    "box_2d": [ymin, xmin, ymax, xmax],
+                })
+            self._live_boxes = boxes
+        except Exception as e:
+            logger.debug(f"Live boxes thread error: {e}")
+        finally:
+            self._world_in_flight = False
+
     def _run_vlm_background(self, frame: np.ndarray, motion_score: float):
-        """Run VLM reasoning and incident handling off the video frame loop."""
+        """Run VLM/World reasoning and incident handling off the video frame loop."""
         try:
             sensor_ctx = self._get_sensor_context()
             result = self._reasoner.reason(frame, self.user_goal, sensor_ctx)
             self._last_result = result
+            if result.boxes:
+                self._live_boxes = result.boxes
             self._last_metrics = result.metrics
             self._last_metrics["motion_score"] = round(motion_score, 3)
             self._last_metrics["vlm_latency_ms"] = round(result.latency_ms, 1)
 
             if result.incident_detected:
                 self._handle_incident(frame, result)
-                asyncio.run(self._broadcast_metrics(result))
+                self._broadcast_metrics_sync(result)
         except Exception as e:
             logger.error(f"[Task {self.task_id}] Background VLM error: {e}")
         finally:
@@ -212,7 +266,7 @@ class UniversalMonitorRunner:
                     "evidence_screenshot_path": evidence_path,
                 }
             }
-            asyncio.run(dashboard_ws_manager.broadcast(alert_payload))
+            dashboard_ws_manager.broadcast_sync(alert_payload)
         except Exception as e:
             logger.debug(f"Failed to broadcast event_alert: {e}")
 
@@ -280,61 +334,76 @@ class UniversalMonitorRunner:
         annotated = frame.copy()
         h, w = annotated.shape[:2]
 
-        # 1. Real-time Motion Bounding Boxes (Layer 1 - 10 FPS)
-        if motion_boxes:
+        is_alert = bool(
+            result and (result.incident_detected or result.action_required in ["alert", "alarm"])
+        )
+
+        # 1. Motion Bounding Boxes (only shown during normal ambient monitoring; suppressed on alert)
+        if not is_alert and motion_boxes:
             for bx1, by1, bx2, by2 in motion_boxes:
-                cv2.rectangle(annotated, (bx1, by1), (bx2, by2), (255, 200, 0), 2)
+                cv2.rectangle(annotated, (bx1, by1), (bx2, by2), (255, 200, 0), 1)
                 cv2.putText(
                     annotated,
                     "MOTION",
                     (bx1 + 2, max(14, by1 - 4)),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.38,
+                    0.35,
                     (255, 200, 0),
                     1,
                     cv2.LINE_AA,
                 )
 
-        # 2. AI Target Object Bounding Boxes (Layer 2 - VLM Grounding)
-        if result and getattr(result, "boxes", None):
-            for b in result.boxes:
-                coords = b.get("box_2d", [])
-                if len(coords) == 4:
-                    ymin, xmin, ymax, xmax = coords
-                    x1 = max(0, min(w - 1, int(xmin * w / 1000)))
-                    y1 = max(0, min(h - 1, int(ymin * h / 1000)))
-                    x2 = max(0, min(w - 1, int(xmax * w / 1000)))
-                    y2 = max(0, min(h - 1, int(ymax * h / 1000)))
+        # 2. Dual-Layer Open-Vocabulary Bounding Boxes
+        #    - Normal state: All visible objects labeled in calm cyan (PERSON, CHAIR, FAN, etc.)
+        #    - Alert state: ONLY the triggering target object(s) shown in bold RED; others hidden
+        raw_boxes = self._live_boxes or (getattr(result, "boxes", None) if result else None) or []
+        if is_alert:
+            target_only = [b for b in raw_boxes if b.get("is_target")]
+            boxes_to_draw = target_only if target_only else raw_boxes
+        else:
+            boxes_to_draw = raw_boxes
 
-                    is_alert = result.incident_detected or result.action_required in ["alert", "alarm"]
-                    box_color = (0, 0, 220) if is_alert else (0, 220, 100)
-                    label = str(b.get("label", "TARGET")).upper()
+        for b in boxes_to_draw:
+            coords = b.get("box_2d", [])
+            if len(coords) != 4:
+                continue
+            ymin, xmin, ymax, xmax = coords
+            x1 = max(0, min(w - 1, int(xmin * w / 1000)))
+            y1 = max(0, min(h - 1, int(ymin * h / 1000)))
+            x2 = max(0, min(w - 1, int(xmax * w / 1000)))
+            y2 = max(0, min(h - 1, int(ymax * h / 1000)))
 
-                    cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2)
-                    c_len = min(16, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
-                    cv2.line(annotated, (x1, y1), (x1 + c_len, y1), box_color, 3)
-                    cv2.line(annotated, (x1, y1), (x1, y1 + c_len), box_color, 3)
-                    cv2.line(annotated, (x2, y1), (x2 - c_len, y1), box_color, 3)
-                    cv2.line(annotated, (x2, y1), (x2, y1 + c_len), box_color, 3)
-                    cv2.line(annotated, (x1, y2), (x1 + c_len, y2), box_color, 3)
-                    cv2.line(annotated, (x1, y2), (x1, y2 - c_len), box_color, 3)
-                    cv2.line(annotated, (x2, y2), (x2 - c_len, y2), box_color, 3)
-                    cv2.line(annotated, (x2, y2), (x2, y2 - c_len), box_color, 3)
+            # Red (0, 0, 235) for active alert box; calm cyan (230, 190, 0) for live ambient boxes
+            box_color = (0, 0, 235) if is_alert else (230, 190, 0)
+            label = str(b.get("label", "OBJECT")).upper()
+            box_conf = b.get("confidence", result.confidence if result else 0.0)
 
-                    tag = f"{label} ({result.confidence:.0%})"
-                    (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-                    badge_y1 = max(0, y1 - th - 6)
-                    cv2.rectangle(annotated, (x1, badge_y1), (x1 + tw + 6, y1), box_color, -1)
-                    cv2.putText(
-                        annotated,
-                        tag,
-                        (x1 + 3, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.42,
-                        (255, 255, 255),
-                        1,
-                        cv2.LINE_AA,
-                    )
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2 if is_alert else 1)
+            c_len = min(16, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
+            thickness = 3 if is_alert else 2
+            cv2.line(annotated, (x1, y1), (x1 + c_len, y1), box_color, thickness)
+            cv2.line(annotated, (x1, y1), (x1, y1 + c_len), box_color, thickness)
+            cv2.line(annotated, (x2, y1), (x2 - c_len, y1), box_color, thickness)
+            cv2.line(annotated, (x2, y1), (x2, y1 + c_len), box_color, thickness)
+            cv2.line(annotated, (x1, y2), (x1 + c_len, y2), box_color, thickness)
+            cv2.line(annotated, (x1, y2), (x1, y2 - c_len), box_color, thickness)
+            cv2.line(annotated, (x2, y2), (x2 - c_len, y2), box_color, thickness)
+            cv2.line(annotated, (x2, y2), (x2, y2 - c_len), box_color, thickness)
+
+            tag = f"ALERT: {label} ({box_conf:.0%})" if is_alert else f"{label} ({box_conf:.0%})"
+            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+            badge_y1 = max(0, y1 - th - 6)
+            cv2.rectangle(annotated, (x1, badge_y1), (x1 + tw + 6, y1), box_color, -1)
+            cv2.putText(
+                annotated,
+                tag,
+                (x1 + 3, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
         # 3. Status bar at top
         status_color = (0, 200, 0)
@@ -359,6 +428,28 @@ class UniversalMonitorRunner:
     # ------------------------------------------------------------------
     # WebSocket broadcast
     # ------------------------------------------------------------------
+
+    def _broadcast_metrics_sync(self, result: Optional[ReasonerResult]):
+        """Thread-safe synchronous broadcast using dashboard_ws_manager.broadcast_sync."""
+        sensor_ctx = self._get_sensor_context()
+        active_res = result or self._last_result
+        payload = {
+            "type": "universal_monitor_update",
+            "task_id": self.task_id,
+            "goal": self.user_goal,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "motion_score": round(self._motion_filter.last_motion_score, 3),
+            "incident_detected": active_res.incident_detected if active_res else False,
+            "confidence": active_res.confidence if active_res else 0.0,
+            "explanation": active_res.explanation if active_res else "",
+            "action_required": active_res.action_required if active_res else "none",
+            "boxes": getattr(active_res, "boxes", []) if active_res else [],
+            # Dynamic metrics for the adaptive UI
+            "metrics": {**self._last_metrics, **sensor_ctx},
+            # Context hint for the UI: tells frontend WHICH widgets to render
+            "active_metrics": self._derive_active_metrics(sensor_ctx),
+        }
+        dashboard_ws_manager.broadcast_sync(payload)
 
     async def _broadcast_metrics(self, result: Optional[ReasonerResult]):
         sensor_ctx = self._get_sensor_context()

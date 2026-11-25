@@ -318,12 +318,12 @@ class TaskRunnerManager:
         ok, frame = camera_stream.get_frame()
         if ok and frame is not None:
             try:
-                from backend.vision.detector import PersonDetector
-                detector = PersonDetector.get_instance()
-                detections = detector.detect(frame, conf_threshold=0.22, imgsz=480)
-                person_count = len(detections)
+                from backend.vision.detector import UniversalWorldDetector, PersonDetector
+                world = UniversalWorldDetector.get_instance()
+                detections, _, _ = world.detect_all(frame, conf_threshold=0.22, imgsz=320)
+                person_count = sum(1 for d in detections if d.class_name == "person")
                 density_level = "low" if person_count <= 2 else ("medium" if person_count <= 5 else "high")
-                annotated = detector.annotate(
+                annotated = PersonDetector.get_instance().annotate(
                     frame=frame,
                     detections=detections,
                     person_count=person_count,

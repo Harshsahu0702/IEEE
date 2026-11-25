@@ -1,6 +1,7 @@
+import asyncio
 import json
 import logging
-from typing import List, Set
+from typing import List, Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
@@ -12,10 +13,15 @@ class ConnectionManager:
 
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.add(websocket)
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         logger.info(f"WebSocket client connected. Total clients: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
@@ -35,6 +41,18 @@ class ConnectionManager:
 
         for dead in dead_connections:
             self.disconnect(dead)
+
+    def broadcast_sync(self, message: dict):
+        """Thread-safe synchronous broadcast for background worker threads."""
+        if not self.active_connections:
+            return
+        if self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.broadcast(message), self.loop)
+        else:
+            try:
+                asyncio.run(self.broadcast(message))
+            except Exception as e:
+                logger.debug(f"broadcast_sync fallback failed: {e}")
 
 
 dashboard_ws_manager = ConnectionManager()

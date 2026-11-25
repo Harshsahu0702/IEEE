@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # Gemini LLM API
     GEMINI_API_KEY: str = ""
 
+    # Local Ollama VLM Settings
+    VLM_PROVIDER: str = "ollama"  # "ollama", "gemini", "offline"
+    OLLAMA_HOST: str = "http://127.0.0.1:11434"
+    OLLAMA_MODEL: str = "moondream"
+
     # MQTT Settings
     MQTT_BROKER_HOST: str = "localhost"
     MQTT_BROKER_PORT: int = 1883

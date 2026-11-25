@@ -525,10 +525,10 @@ export const LiveMonitoring = () => {
               </div>
             )}
 
-            {/* Privacy Protocol Badge */}
+            {/* Privacy Protocol Badge
             <div className="absolute bottom-3 left-3 px-3 py-1 rounded-md bg-slate-900/80 backdrop-blur-sm border border-slate-700 text-[10px] font-mono text-slate-300">
               🔒 Privacy Protocol: Aggregate Count &bull; Zero Biometric ID &bull; Motion Bounding Active
-            </div>
+            </div> */}
           </div>
         </div>
 
