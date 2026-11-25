@@ -33,31 +33,32 @@ export const Login = () => {
     setUsername(u);
     setPassword(p);
     setError('');
-  };
+  };  
 
   return (
     <div className="min-h-screen bg-dark-950 flex flex-col justify-center items-center px-4 relative overflow-hidden">
       {/* Background ambient security grid */}
-      <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-25" />
+      {/* <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px] opacity-25" />
       <div className="absolute w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl -top-20 -left-20 pointer-events-none" />
-      <div className="absolute w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl -bottom-20 -right-20 pointer-events-none" />
+      <div className="absolute w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl -bottom-20 -right-20 pointer-events-none" /> */}
 
       <div className="max-w-md w-full relative z-10">
         {/* Header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 mb-4 shadow-lg shadow-emerald-950">
+        <div className="text-center mt-8 mb-8">
+          {/* <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 mb-4 shadow-lg shadow-emerald-950">
             <Shield className="w-7 h-7" />
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">OmniSense AI</h1>
-          <p className="text-xs text-slate-400 font-mono mt-1">Autonomous AI+IoT Security & Monitoring Platform</p>
+          </div> */}
+          <h1 className="text-2xl font-bold tracking-tight text-white">OmniSense</h1>
+          <h1 className='text-[20px] mt-2 mb-2 font-bold tracking-tight text-white'>Welcome Back</h1>
+          <p className="text-xs text-slate-400 font-mono mt-1">Sign in to access your monitoring workspace.</p>
         </div>
 
         {/* Card */}
         <div className="bg-dark-900/90 border border-dark-800 rounded-2xl p-7 shadow-2xl backdrop-blur-xl">
-          <div className="border-b border-dark-800 pb-4 mb-5">
+          {/* <div className="border-b border-dark-800 pb-4 mb-5">
             <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-200">Operator Sign In</h2>
             <p className="text-xs text-slate-400 mt-0.5">Access dashboard metrics, camera feeds & command agent.</p>
-          </div>
+          </div> */}
 
           {error && (
             <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center gap-2.5 text-xs text-rose-300">
@@ -131,7 +132,7 @@ export const Login = () => {
         </div>
 
         <p className="text-center text-[10px] font-mono text-slate-400 mt-6">
-          OmniSense AI Milestone 1 &bull; Zero-Identity Surveillance &bull; SOC Compliant
+          OmniSense · Monitoring & Operations
         </p>
       </div>
     </div>
