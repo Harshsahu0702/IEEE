@@ -133,6 +133,7 @@ export const CommandCenter = () => {
 
     try {
       const res = await api.agent.sendCommand(command);
+      // console.log("Agent API Response:", res);
       setPlanResult(res);
       if (res.plan?.rules) {
         setEditableRules({ ...res.plan.rules });
@@ -158,42 +159,43 @@ export const CommandCenter = () => {
     }
   };
 
-  const handleActivateProfile = async (profileId) => {
-    setProfileLoading(true);
-    try {
-      const res = await api.profiles.activate(profileId);
-      setPlanResult({
-        plan_id: res.plan_id,
-        status: 'pending_approval',
-        plan: res.plan,
-        explanation: {
-          what_i_understood: res.message,
-          why: `Activated via profile preset '${res.profile_name}'.`,
-          modules_chosen: res.plan.modules,
-          confidence: 0.98
-        },
-        safety: {
-          decision: 'approved',
-          risk_level: 'safe'
-        }
-      });
-      setEditableRules(res.plan.rules || {});
-      if (res.plan.rules?.zones?.[0]?.polygon) {
-        const poly = res.plan.rules.zones[0].polygon;
-        setZoneRect({
-          x1: Math.min(...poly.map(p => p[0])),
-          y1: Math.min(...poly.map(p => p[1])),
-          x2: Math.max(...poly.map(p => p[0])),
-          y2: Math.max(...poly.map(p => p[1])),
+    const handleActivateProfile = async (profileId) => {
+      setProfileLoading(true);
+      try {
+        const res = await api.profiles.activate(profileId);
+        // console.log(res)
+        setPlanResult({
+          plan_id: res.plan_id,
+          status: 'pending_approval',
+          plan: res.plan,
+          explanation: {
+            what_i_understood: res.message,
+            why: `Activated via profile preset '${res.profile_name}'.`,
+            modules_chosen: res.plan.modules,
+            confidence: 0.98
+          },
+          safety: {
+            decision: 'approved',
+            risk_level: 'safe'
+          }
         });
+        setEditableRules(res.plan.rules || {});
+        if (res.plan.rules?.zones?.[0]?.polygon) {
+          const poly = res.plan.rules.zones[0].polygon;
+          setZoneRect({
+            x1: Math.min(...poly.map(p => p[0])),
+            y1: Math.min(...poly.map(p => p[1])),
+            x2: Math.max(...poly.map(p => p[0])),
+            y2: Math.max(...poly.map(p => p[1])),
+          });
+        }
+        addToast(`Profile staged. Review thresholds and click Approve.`, 'info');
+      } catch (err) {
+        addToast(err.message || 'Failed to activate profile', 'error');
+      } finally {
+        setProfileLoading(false);
       }
-      addToast(`Profile staged. Review thresholds and click Approve.`, 'info');
-    } catch (err) {
-      addToast(err.message || 'Failed to activate profile', 'error');
-    } finally {
-      setProfileLoading(false);
-    }
-  };
+    };
 
   const handleApprovePlan = async (approved) => {
     if (!planResult?.plan_id) return;
@@ -241,54 +243,15 @@ export const CommandCenter = () => {
     }
   };
 
-  const handleChangePassword = async (e) => {
-    e.preventDefault();
-    setChangingPassword(true);
-    try {
-      await api.auth.changePassword(oldPassword, newPassword);
-      addToast('Password updated! Default credential alert resolved.', 'success');
-      setShowPasswordModal(false);
-      setOldPassword('');
-      setNewPassword('');
-    } catch (err) {
-      addToast(err.message || 'Failed to update password', 'error');
-    } finally {
-      setChangingPassword(false);
-    }
-  };
-
   const isSecurityPlan = planResult?.plan?.modules?.includes('security_monitoring');
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto">
-      {/* Default Password Security Warning */}
-      {user?.is_default_password && (
-        <div className="bg-amber-950/30 border border-amber-500/50 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg shadow-amber-950/20">
-          <div className="flex items-center gap-3">
-            <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
-            <div>
-              <div className="text-sm font-semibold text-amber-200">
-                Default Administrator Password Detected ('admin123')
-              </div>
-              <p className="text-xs text-amber-300/80">
-                System hardening policy recommends immediately replacing the default credential.
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => setShowPasswordModal(true)}
-            className="px-3 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 text-dark-950 font-bold rounded-lg transition shrink-0"
-          >
-            Change Password
-          </button>
-        </div>
-      )}
-
       {/* Page Title */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
         <div>
-          <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-            <Terminal className="w-5 h-5 text-emerald-400" />
+          <h1 className="text-xl font-bold text-black tracking-tight flex items-center gap-2">
+            <Terminal className="w-5 h-5 text-emerald-700" />
             <span>AI Command Center</span>
           </h1>
           <p className="text-xs text-slate-400 mt-1">
@@ -461,13 +424,13 @@ export const CommandCenter = () => {
                 <div className="p-4 rounded-xl bg-dark-950/80 border border-dark-800 space-y-1">
                   <span className="text-[10px] font-mono uppercase text-slate-400">Modules Selected</span>
                   <div className="flex flex-wrap gap-1.5 mt-1">
-                    {planResult.plan.modules?.map((m) => (
+                    {planResult.plan?.modules?.map((m) => (
                       <span key={m} className="px-2 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-xs font-mono">
                         {m}
                       </span>
                     ))}
                   </div>
-                  <p className="text-[10px] text-slate-400 mt-2 font-mono">Source: {planResult.plan.source}</p>
+                  <p className="text-[10px] text-slate-400 mt-2 font-mono">Source: {planResult.plan?.source || "N/A"}</p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-dark-950/80 border border-dark-800 space-y-1">

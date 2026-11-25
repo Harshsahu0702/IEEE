@@ -176,7 +176,7 @@ class FallbackParser:
 
         if has_crowd and not has_env:
             threshold = person_threshold if person_threshold is not None else 4
-            task_desc = "presence/intrusion alert (any person)" if threshold == 0 else f"crowd monitoring with threshold {threshold}"
+            task_desc = "presence/intrusion alert (any person)" if threshold == 1 else f"crowd monitoring with threshold {threshold}"
             return {
                 "intent": intent,
                 "domain": "vision",
@@ -257,9 +257,9 @@ class FallbackParser:
         return None
 
     def _extract_person_threshold(self, text: str) -> Optional[int]:
-        # "alert if any person comes in frame", "someone", "anyone" -> threshold 0
+        # "alert if any person comes in frame", "someone", "anyone" -> threshold 1
         if any(p in text for p in ["any person", "a person", "someone", "anyone", "anybody", "intruder", "comes in", "enters", "appears"]):
-            return 0
+            return 1
         # "limit 30 people", "limit of 5", "threshold 10"
         m = re.search(r"(?:limit|threshold|max|more than|se jyada)\s*(?:of|is)?\s*(\d+)", text)
         if m:

@@ -31,11 +31,11 @@ export default function Settings() {
     <div className="space-y-6 max-w-5xl">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
-          <SettingsIcon className="w-6 h-6 text-indigo-400" />
+        <h1 className="text-2xl font-bold text-black flex items-center gap-2">
+          <SettingsIcon className="w-6 h-6 text-indigo-700" />
           System Settings & Platform Profile
         </h1>
-        <p className="text-sm text-slate-400 mt-1">
+        <p className="text-sm text-indigo-400 mt-1">
           Review operator credentials, algorithm configurations, and privacy governance rules.
         </p>
       </div>

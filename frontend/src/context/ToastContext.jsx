@@ -6,7 +6,15 @@ const ToastContext = createContext(null);
 export const ToastProvider = ({ children }) => {
   const [toasts, setToasts] = useState([]);
 
-  const addToast = useCallback((toast) => {
+  const addToast = useCallback((toast, type = 'info') => {
+  // Support both addToast("message", "type")
+  // and addToast({ message: "message", type: "type" })
+    if (typeof toast === 'string') {
+      toast = {
+        message: toast,
+        type: type
+      };
+    }
     const id = Date.now() + Math.random().toString(36).substring(2, 6);
     const newToast = {
       id,
