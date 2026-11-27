@@ -149,29 +149,55 @@ Rules:
 """
 
 
-def _call_gemini(frame: np.ndarray, user_goal: str, context: dict) -> ReasonerResult:
-    """Call Google GenAI Vision API (gemini-3.5-flash-lite / gemini-3.8-flash)."""
-    try:
+_GEMINI_CLIENT = None
+
+
+def _get_gemini_client():
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
         from google import genai
+        _GEMINI_CLIENT = genai.Client(api_key=settings.GEMINI_API_KEY)
+    return _GEMINI_CLIENT
+
+
+def _call_gemini(
+    frame: np.ndarray,
+    user_goal: str,
+    context: dict,
+    temporal_jpegs: Optional[list[bytes]] = None,
+) -> ReasonerResult:
+    """Call Google GenAI Vision API with optional chronological multi-frame sliding window."""
+    try:
         from google.genai import types
 
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        client = _get_gemini_client()
 
-        # Encode frame to JPEG
+        contents = []
+        if temporal_jpegs:
+            for jpg_bytes in temporal_jpegs:
+                contents.append(types.Part.from_bytes(data=jpg_bytes, mime_type="image/jpeg"))
+
+        # Encode current frame to JPEG
         _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        image_part = types.Part.from_bytes(data=buffer.tobytes(), mime_type="image/jpeg")
+        contents.append(types.Part.from_bytes(data=buffer.tobytes(), mime_type="image/jpeg"))
 
         prompt = _build_prompt(user_goal, context)
+        if temporal_jpegs:
+            prompt += (
+                f"\n\nTEMPORAL SEQUENCE CONTEXT:\n"
+                f"You are given {len(contents)} chronological frames from oldest (first) to newest (last, current frame). "
+                f"Evaluate the progression across frames to confirm whether the behavior or trigger condition truly occurred."
+            )
+        contents.append(prompt)
 
         t0 = time.time()
-        # Try gemini-3.5-flash-lite, fallback to gemini-3.8-flash
-        model_names = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+        model_names = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash-lite"]
         response = None
         for m in model_names:
             try:
                 response = client.models.generate_content(
                     model=m,
-                    contents=[image_part, prompt]
+                    contents=contents,
                 )
                 if response and response.text:
                     break
@@ -623,16 +649,22 @@ class VLMReasoner:
     _instance: Optional["VLMReasoner"] = None
 
     def __init__(self):
-        provider = getattr(settings, "VLM_PROVIDER", "ollama").lower()
-        if provider == "ollama":
+        provider = getattr(settings, "VLM_PROVIDER", "gemini").lower()
+        if provider == "gemini" and settings.GEMINI_API_KEY:
+            self._mode = "gemini"
+            logger.info("VLMReasoner initialized in mode: Google Gemini Cloud VLM")
+        elif provider == "ollama":
             self._mode = "ollama"
             logger.info(f"VLMReasoner initialized in mode: Local Ollama ({getattr(settings, 'OLLAMA_MODEL', 'moondream')})")
-        elif provider == "gemini" and settings.GEMINI_API_KEY:
+        elif provider == "offline":
+            self._mode = "offline"
+            logger.info("VLMReasoner initialized in mode: Offline Heuristic")
+        elif settings.GEMINI_API_KEY:
             self._mode = "gemini"
-            logger.info("VLMReasoner initialized in mode: Gemini Cloud")
+            logger.info("VLMReasoner initialized in mode: Google Gemini Cloud VLM (auto)")
         else:
-            self._mode = "ollama"
-            logger.info("VLMReasoner initialized in mode: Auto (Ollama)")
+            self._mode = "offline"
+            logger.info("VLMReasoner initialized in mode: Offline Heuristic (no GEMINI_API_KEY)")
 
     @classmethod
     def get_instance(cls) -> "VLMReasoner":
@@ -645,12 +677,17 @@ class VLMReasoner:
         frame: np.ndarray,
         user_goal: str,
         sensor_context: Optional[dict] = None,
+        precomputed_detections: Optional[list] = None,
+        temporal_jpegs: Optional[list[bytes]] = None,
+        world_engine: str = "precomputed",
+        world_latency: float = 0.0,
     ) -> ReasonerResult:
         """
         Primary two-tier inference call.
-        1. Runs UniversalWorldDetector (Open-Vocabulary) for all live object boxes.
+        1. Reuses precomputed_detections if supplied (Single-Inference Producer Pattern),
+           or runs UniversalWorldDetector if called standalone.
         2. Evaluates spatial/count rules directly on Tier 1, or delegates semantic
-           action/state checks to Tier 2 VLM while preserving live spatial boxes.
+           action/state checks to Tier 2 VLM (with optional multi-frame sliding window).
         """
         context = sensor_context or {}
         spec = _parse_goal_directive(user_goal)
@@ -658,19 +695,21 @@ class VLMReasoner:
         required_count: int = spec["required_count"]
         requires_vlm: bool = spec["requires_vlm"]
 
-        # Tier 1: Open-Vocabulary World Detection (live boxes for all visible objects)
+        # Tier 1: Open-Vocabulary World Detection (compute once, reuse everywhere)
         all_boxes: list[dict] = []
         matched_boxes: list[dict] = []
-        world_engine = "none"
-        world_latency = 0.0
 
         try:
-            from backend.vision.detector import UniversalWorldDetector
-            detector = UniversalWorldDetector.get_instance()
-            detections, world_engine, world_latency = detector.detect_all(
-                frame,
-                target_classes=targets if targets else None,
-            )
+            if precomputed_detections is not None:
+                detections = precomputed_detections
+            else:
+                from backend.vision.detector import UniversalWorldDetector
+                detector = UniversalWorldDetector.get_instance()
+                detections, world_engine, world_latency = detector.detect_all(
+                    frame,
+                    target_classes=targets if targets else None,
+                )
+
             h, w = frame.shape[:2]
             for d in detections:
                 ymin = max(0, min(1000, int(d.y1 * 1000 / h)))
@@ -720,10 +759,10 @@ class VLMReasoner:
             )
 
         # Tier 2: Semantic / Temporal Action / State reasoning via configured VLM
-        if self._mode == "ollama":
+        if self._mode == "gemini":
+            vlm_res = _call_gemini(frame, user_goal, context, temporal_jpegs=temporal_jpegs)
+        elif self._mode == "ollama":
             vlm_res = _call_ollama(frame, user_goal, context)
-        elif self._mode == "gemini":
-            vlm_res = _call_gemini(frame, user_goal, context)
         else:
             vlm_res = _offline_fallback(frame, user_goal, context)
 

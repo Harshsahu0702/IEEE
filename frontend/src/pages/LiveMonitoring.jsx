@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../services/api';
 import { wsService } from '../services/websocket';
 import { useToast } from '../context/ToastContext';
@@ -35,10 +35,12 @@ import {
 } from 'recharts';
 
 import AdaptiveMonitorPanel from '../components/monitoring/AdaptiveMonitorPanel';
+import LiveVideoCanvas from '../components/monitoring/LiveVideoCanvas';
+import HardwareSelectorPanel from '../components/monitoring/HardwareSelectorPanel';
 
 export const LiveMonitoring = () => {
   const { addToast } = useToast();
-  const [videoSrc, setVideoSrc] = useState(api.getVideoStreamUrl());
+  const [streamReconnectKey, setStreamReconnectKey] = useState(0);
   // Universal monitor WS state
   const [universalMonitorData, setUniversalMonitorData] = useState(null);
   const [activeGoal, setActiveGoal] = useState('');
@@ -52,10 +54,11 @@ export const LiveMonitoring = () => {
   const [activeTab, setActiveTab] = useState('laptop'); // 'laptop' or 'phone'
   const [switchingCamera, setSwitchingCamera] = useState(false);
   const [showPhoneHelp, setShowPhoneHelp] = useState(false);
+  const [showHardwarePanel, setShowHardwarePanel] = useState(false);
 
-  // Vision Stats
+  // Vision Stats (live FPS measured directly from hardware-accelerated canvas)
   const [visionStats, setVisionStats] = useState({
-    fps: 15,
+    fps: 20,
     timestamp: Date.now()
   });
 
@@ -214,10 +217,22 @@ export const LiveMonitoring = () => {
     };
   }, [isMuted]);
 
-  const refreshStream = () => {
+  const refreshStream = useCallback(() => {
     setStreamError(false);
-    setVideoSrc(api.getVideoStreamUrl() + `&_t=${Date.now()}`);
-  };
+    setStreamReconnectKey((k) => k + 1);
+  }, []);
+
+  const handleFpsUpdate = useCallback((fps) => {
+    setVisionStats({ fps, timestamp: Date.now() });
+  }, []);
+
+  const handleStreamError = useCallback((hasErr) => {
+    setStreamError(Boolean(hasErr));
+  }, []);
+
+  const handleStreamReady = useCallback(() => {
+    setStreamError(false);
+  }, []);
 
   const handleSwitchSource = async (source) => {
     setSwitchingCamera(true);
@@ -227,7 +242,7 @@ export const LiveMonitoring = () => {
         addToast({
           type: 'success',
           title: 'Camera Switched Successfully',
-          message: `Switched stream input to ${res.source_type} (${res.new_source}).`,
+          message: res.message || `Switched stream input to ${res.source || source}.`,
           duration: 3500
         });
         refreshStream();
@@ -235,7 +250,7 @@ export const LiveMonitoring = () => {
         addToast({
           type: 'error',
           title: 'Camera Switch Failed',
-          message: res.error || 'Failed to switch camera.',
+          message: res.message || res.error || 'Failed to switch camera.',
           duration: 5000
         });
       }
@@ -322,7 +337,7 @@ export const LiveMonitoring = () => {
               Live AI Video Monitor
             </h1>
             <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-              1080p · 15fps
+              640×480 · {visionStats.fps || 20}fps
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
@@ -363,6 +378,19 @@ export const LiveMonitoring = () => {
               <span>Phone Stream</span>
             </button>
           </div>
+
+          <button
+            onClick={() => setShowHardwarePanel((v) => !v)}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-medium transition shadow-sm ${
+              showHardwarePanel
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-700'
+            }`}
+            title="Select active cameras & verified sensors"
+          >
+            <Gauge className="w-3.5 h-3.5" />
+            <span>Components</span>
+          </button>
 
           <button
             onClick={handleRotate}
@@ -430,6 +458,11 @@ export const LiveMonitoring = () => {
         </div>
       )}
 
+      {/* Dynamic Hardware & Component Selector Drawer */}
+      {showHardwarePanel && (
+        <HardwareSelectorPanel onCameraSwitched={refreshStream} />
+      )}
+
       {/* Active Goal Indicator Banner */}
       {activeGoal && (
         <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 shadow-sm text-xs font-medium">
@@ -495,26 +528,26 @@ export const LiveMonitoring = () => {
             </div>
 
             <div className="flex items-center gap-4 text-xs font-mono text-slate-500">
-              <span>FPS: <strong className="text-emerald-600">{visionStats.fps || 15}</strong></span>
-              <span>Motion Bounding: <strong className="text-slate-800 font-semibold">Active</strong></span>
+              <span>FPS: <strong className="text-emerald-600">{visionStats.fps || 20}</strong></span>
+              <span>Stream: <strong className="text-slate-800 font-semibold">WS Canvas</strong></span>
             </div>
           </div>
 
-          {/* Video Viewport Container */}
+          {/* Video Viewport Container (Always keep LiveVideoCanvas mounted so auto-reconnect recovers automatically) */}
           <div className="relative aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
-            {!streamError ? (
-              <img
-                src={videoSrc}
-                alt="Live Video Stream Feed"
-                onError={() => setStreamError(true)}
-                className="w-full h-full object-contain"
-              />
-            ) : (
-              <div className="p-8 text-center space-y-3">
+            <LiveVideoCanvas
+              reconnectKey={streamReconnectKey}
+              onFpsUpdate={handleFpsUpdate}
+              onStreamError={handleStreamError}
+              onStreamReady={handleStreamReady}
+              className="w-full h-full object-contain"
+            />
+            {streamError && (
+              <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm p-8 text-center flex flex-col items-center justify-center space-y-3">
                 <AlertTriangle className="w-10 h-10 text-amber-500 mx-auto" />
                 <h4 className="text-sm font-semibold text-white">Video Stream Offline</h4>
                 <p className="text-xs text-slate-400 max-w-sm">
-                  Ensure camera is plugged in or start a monitoring task from AI Command Center.
+                  Backend server (port 8000) is unreachable or camera stream is initializing. Auto-reconnecting...
                 </p>
                 <button
                   onClick={refreshStream}

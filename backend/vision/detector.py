@@ -145,6 +145,16 @@ class UniversalWorldDetector:
         self._world_model.model.names = {i: n for i, n in enumerate(all_names)}
         self._active_custom_classes = normalized
 
+    def prebake_classes(self, target_classes: Optional[List[str]]) -> None:
+        """
+        Pre-compile open-vocabulary CLIP text embeddings at plan approval / task startup
+        so runtime frames never hit a cold-start text encoding stall.
+        """
+        if not target_classes or self.is_in_int8_vocabulary(target_classes):
+            return
+        with self._infer_lock:
+            self._bind_custom_classes(target_classes)
+
     def detect_all(
         self,
         frame: np.ndarray,

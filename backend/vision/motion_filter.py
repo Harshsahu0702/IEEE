@@ -28,25 +28,31 @@ class MotionFilter:
         self,
         min_area_ratio: float = 0.005,   # 0.5% of frame must change
         sensitivity: int = 25,            # pixel diff threshold (lower = more sensitive)
-        blur_radius: int = 11,            # gaussian blur before diff (reduce noise)
+        blur_radius: int = 5,             # gaussian blur on 160x120 downsampled frame
+        downsample_size: tuple[int, int] = (160, 120),
     ):
         self.min_area_ratio = min_area_ratio
         self.sensitivity = sensitivity
-        self.blur_radius = blur_radius
+        self.blur_radius = blur_radius if blur_radius % 2 == 1 else blur_radius + 1
+        self.downsample_size = downsample_size
         self._prev_gray: Optional[np.ndarray] = None
         self._last_motion_score: float = 0.0
 
     def detect(self, frame: np.ndarray) -> tuple[bool, float, list[tuple[int, int, int, int]]]:
         """
-        Analyze a frame for motion.
+        Analyze a frame for motion using 4x downsampled frame differencing (<1ms CPU).
 
         Returns:
             (motion_detected: bool, motion_score: float 0.0–1.0, motion_boxes: list of (x1, y1, x2, y2))
         """
         h, w = frame.shape[:2]
-        total_pixels = h * w
+        dw, dh = self.downsample_size
+        total_pixels = dw * dh
+        scale_x = w / float(dw)
+        scale_y = h / float(dh)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_NEAREST)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (self.blur_radius, self.blur_radius), 0)
 
         if self._prev_gray is None:
@@ -61,14 +67,19 @@ class MotionFilter:
 
         motion_area = 0.0
         motion_boxes = []
-        min_box_area = total_pixels * 0.002  # At least 0.2% of frame to avoid noise
+        min_box_area = total_pixels * 0.002  # At least 0.2% of downsampled frame
 
         for c in contours:
             area = cv2.contourArea(c)
             if area >= min_box_area:
                 motion_area += area
                 bx, by, bw, bh = cv2.boundingRect(c)
-                motion_boxes.append((bx, by, bx + bw, by + bh))
+                motion_boxes.append((
+                    int(bx * scale_x),
+                    int(by * scale_y),
+                    int((bx + bw) * scale_x),
+                    int((by + bh) * scale_y),
+                ))
 
         motion_score = min(motion_area / total_pixels, 1.0)
         self._last_motion_score = motion_score

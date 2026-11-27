@@ -23,7 +23,7 @@ import {
 // Individual Metric Widget Components (Sentinel Light Palette)
 // ---------------------------------------------------------------------------
 
-const TimeSeriesChart = ({ title, icon: Icon, data, dataKey, color, unit, referenceValue, referenceLabel }) => (
+const TimeSeriesChart = React.memo(({ title, icon: Icon, data, dataKey, color, unit, referenceValue, referenceLabel }) => (
   <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-3">
     <div className="flex items-center justify-between border-b border-slate-100 pb-3">
       <h3 className="text-xs font-mono font-semibold text-slate-800 uppercase tracking-wider flex items-center gap-2">
@@ -65,9 +65,9 @@ const TimeSeriesChart = ({ title, icon: Icon, data, dataKey, color, unit, refere
       </ResponsiveContainer>
     </div>
   </div>
-);
+));
 
-const StatusCard = ({ label, value, color, icon: Icon, subtext }) => (
+const StatusCard = React.memo(({ label, value, color, icon: Icon, subtext }) => (
   <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm flex flex-col gap-1">
     <div className="flex items-center gap-1.5 text-slate-500 text-xs mb-1">
       {Icon && <Icon className="w-3.5 h-3.5" style={{ color }} />}
@@ -76,9 +76,9 @@ const StatusCard = ({ label, value, color, icon: Icon, subtext }) => (
     <span className="text-xl font-bold font-mono text-slate-900" style={{ color }}>{value}</span>
     {subtext && <p className="text-[10px] text-slate-400 font-mono">{subtext}</p>}
   </div>
-);
+));
 
-const RiskGauge = ({ score, label }) => {
+const RiskGauge = React.memo(({ score, label }) => {
   const pct = Math.min(100, Math.max(0, score || 0));
   const color = pct >= 70 ? '#ef4444' : pct >= 40 ? '#f59e0b' : '#10b981';
   return (
@@ -104,9 +104,9 @@ const RiskGauge = ({ score, label }) => {
       </div>
     </div>
   );
-};
+});
 
-const SafetyStatusCard = ({ incident_detected, explanation }) => (
+const SafetyStatusCard = React.memo(({ incident_detected, explanation }) => (
   <div className={`p-5 rounded-2xl border shadow-sm flex items-start gap-4 ${
     incident_detected
       ? 'bg-rose-50 border-rose-200 text-rose-900'
@@ -123,9 +123,9 @@ const SafetyStatusCard = ({ incident_detected, explanation }) => (
       <p className="text-xs text-slate-600 mt-1">{explanation || 'AI is actively monitoring the scene.'}</p>
     </div>
   </div>
-);
+));
 
-const IncidentTimeline = ({ events }) => (
+const IncidentTimeline = React.memo(({ events }) => (
   <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-3">
     <h3 className="text-xs font-mono font-semibold text-slate-800 uppercase tracking-wider flex items-center gap-2">
       <Clock className="w-4 h-4 text-indigo-500" />
@@ -146,9 +146,9 @@ const IncidentTimeline = ({ events }) => (
       )}
     </div>
   </div>
-);
+));
 
-const MotionScoreBar = ({ score }) => {
+const MotionScoreBar = React.memo(({ score }) => {
   const pct = Math.round((score || 0) * 100);
   return (
     <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-sm">
@@ -165,44 +165,55 @@ const MotionScoreBar = ({ score }) => {
       </div>
     </div>
   );
-};
+});
 
 // ---------------------------------------------------------------------------
-// Main Adaptive Panel
+// Main Adaptive Panel (Two-Speed Architecture: Fast HUD + 1 Hz Slow Chart)
 // ---------------------------------------------------------------------------
 
 const AdaptiveMonitorPanel = ({ wsData, goal, sideBySide = false }) => {
   const [history, setHistory] = useState([]);
   const [incidentLog, setIncidentLog] = useState([]);
   const historyRef = useRef([]);
+  const lastChartTickRef = useRef(0);
+  const lastIncidentKeyRef = useRef('');
 
   useEffect(() => {
     if (!wsData) return;
 
-    const now = new Date();
+    const nowMs = Date.now();
+    const now = new Date(nowMs);
     const timeLabel = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
 
-    const point = {
-      time: timeLabel,
-      person_count: wsData.metrics?.person_count ?? null,
-      temperature: wsData.metrics?.temperature ?? null,
-      gas_level: wsData.metrics?.gas_level ?? null,
-      humidity: wsData.metrics?.humidity ?? null,
-      motion_score: wsData.motion_score ? Math.round(wsData.motion_score * 100) : null,
-      risk_score: wsData.metrics?.risk_score ?? null,
-    };
+    // Slow Lane (1 Hz): Only update Recharts SVG history once per second
+    if (nowMs - lastChartTickRef.current >= 1000) {
+      lastChartTickRef.current = nowMs;
+      const point = {
+        time: timeLabel,
+        person_count: wsData.metrics?.person_count ?? null,
+        temperature: wsData.metrics?.temperature ?? null,
+        gas_level: wsData.metrics?.gas_level ?? null,
+        humidity: wsData.metrics?.humidity ?? null,
+        motion_score: wsData.motion_score ? Math.round(wsData.motion_score * 100) : null,
+        risk_score: wsData.metrics?.risk_score ?? null,
+      };
 
-    const updated = [...historyRef.current, point].slice(-30);
-    historyRef.current = updated;
-    setHistory([...updated]);
+      const updated = [...historyRef.current, point].slice(-30);
+      historyRef.current = updated;
+      setHistory(updated);
+    }
 
     if (wsData.incident_detected) {
-      const incident = {
-        time: timeLabel,
-        explanation: wsData.explanation,
-        action: wsData.action_required,
-      };
-      setIncidentLog(prev => [incident, ...prev].slice(0, 50));
+      const incidentKey = `${timeLabel}:${wsData.explanation}`;
+      if (incidentKey !== lastIncidentKeyRef.current) {
+        lastIncidentKeyRef.current = incidentKey;
+        const incident = {
+          time: timeLabel,
+          explanation: wsData.explanation,
+          action: wsData.action_required,
+        };
+        setIncidentLog(prev => [incident, ...prev].slice(0, 50));
+      }
     }
   }, [wsData]);
 
@@ -255,6 +266,24 @@ const AdaptiveMonitorPanel = ({ wsData, goal, sideBySide = false }) => {
             value={metrics.motion_detected ? 'Active' : 'Clear'}
             color={metrics.motion_detected ? '#059669' : '#64748b'}
             subtext="Digital hardware pin" />
+        )}
+        {active.includes('cpu_percent') && metrics.cpu_percent != null && (
+          <StatusCard label="Host CPU" icon={Activity}
+            value={`${metrics.cpu_percent}%`}
+            color={metrics.cpu_percent > 85 ? '#ef4444' : '#2563eb'}
+            subtext="Verified OS load" />
+        )}
+        {active.includes('memory_percent') && metrics.memory_percent != null && (
+          <StatusCard label="Host RAM" icon={Activity}
+            value={`${metrics.memory_percent}%`}
+            color={metrics.memory_percent > 90 ? '#ef4444' : '#0891b2'}
+            subtext="System memory" />
+        )}
+        {active.includes('battery_percent') && metrics.battery_percent != null && (
+          <StatusCard label="Battery" icon={Activity}
+            value={`${metrics.battery_percent}%`}
+            color={metrics.battery_percent < 20 ? '#ef4444' : '#059669'}
+            subtext="Laptop power" />
         )}
       </div>
 

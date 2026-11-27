@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from sqlalchemy.orm import Session
 
+from backend.config import settings
 from backend.database.connection import SessionLocal
 from backend.database import crud
 from backend.monitoring.registry import get_plugin
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 class VisionTaskWorker:
     """
     Background worker for vision monitoring plugins (e.g. crowd_monitoring).
-    Runs at ~10 FPS, consumes frames from camera_stream, executes plugin logic,
+    Runs at unified TARGET_FPS (20 FPS), consumes frames from camera_stream, executes plugin logic,
     persists events to SQLite ('pending_review'), and broadcasts live metrics over WebSocket.
     """
     def __init__(self, task_id: int, plugin: MonitoringPlugin, config: Dict[str, Any]):
@@ -30,6 +31,10 @@ class VisionTaskWorker:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._latest_annotated: Optional[np.ndarray] = None
+        self._latest_jpeg_bytes: Optional[bytes] = None
+        self._latest_frame_id: int = -1
+        self._latest_timestamp_ms: float = 0.0
+        self._frame_seq: int = 0
         self._lock = threading.Lock()
         self._fps: float = 0.0
 
@@ -47,14 +52,14 @@ class VisionTaskWorker:
         logger.info(f"VisionTaskWorker started for task {self.task_id}")
 
     def _worker_loop(self):
-        target_fps = 10.0
-        frame_interval = 1.0 / target_fps
+        target_fps = float(self.config.get("target_fps", settings.TARGET_FPS))
+        frame_interval = 1.0 / max(target_fps, 1.0)
         frame_count = 0
         fps_timer = time.time()
 
         while self._running:
             loop_start = time.time()
-            ok, frame = camera_stream.get_frame()
+            ok, frame, _, ts_ms = camera_stream.get_frame_meta()
 
             if ok and frame is not None:
                 # 1. Process frame with plugin
@@ -68,10 +73,19 @@ class VisionTaskWorker:
                             frame_count = 0
                             fps_timer = time.time()
 
-                        # Store latest annotated frame from plugin
+                        # Store latest annotated frame and pre-encode JPEG ONCE in worker thread
                         if hasattr(self.plugin, "last_annotated_frame") and self.plugin.last_annotated_frame is not None:
+                            ann = self.plugin.last_annotated_frame
+                            quality = getattr(settings, "JPEG_QUALITY", 75)
+                            ret, buf = cv2.imencode(".jpg", ann, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                            jpeg_bytes = buf.tobytes() if ret else None
                             with self._lock:
-                                self._latest_annotated = self.plugin.last_annotated_frame.copy()
+                                self._latest_annotated = ann.copy()
+                                if jpeg_bytes is not None:
+                                    self._frame_seq += 1
+                                    self._latest_jpeg_bytes = jpeg_bytes
+                                    self._latest_frame_id = self._frame_seq
+                                    self._latest_timestamp_ms = ts_ms
 
                         # 2. Check for generated events
                         events = self.plugin.generate_events()
@@ -161,6 +175,10 @@ class VisionTaskWorker:
             if self._latest_annotated is not None:
                 return self._latest_annotated.copy()
             return None
+
+    def get_latest_jpeg(self) -> tuple[Optional[bytes], int, float]:
+        with self._lock:
+            return self._latest_jpeg_bytes, self._latest_frame_id, self._latest_timestamp_ms
 
     def stop(self):
         self._running = False
@@ -304,6 +322,16 @@ class TaskRunnerManager:
 
     def get_active_worker(self, task_id: int) -> Optional[Any]:
         return self._active_workers.get(task_id)
+
+    def get_active_worker_jpeg(self) -> tuple[Optional[bytes], int, float]:
+        """Non-blocking pre-encoded JPEG retrieval from active VisionTaskWorker only."""
+        with self._lock:
+            for worker in self._active_workers.values():
+                if isinstance(worker, VisionTaskWorker):
+                    jpeg_bytes, fid, ts_ms = worker.get_latest_jpeg()
+                    if jpeg_bytes is not None:
+                        return jpeg_bytes, fid, ts_ms
+        return None, -1, 0.0
 
     def get_latest_vision_frame(self) -> Optional[np.ndarray]:
         """Returns the latest annotated frame from any active vision worker, or real-time camera preview detection."""

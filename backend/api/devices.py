@@ -153,7 +153,45 @@ def get_global_alarm():
 def update_global_alarm(req: AlarmControlRequest):
     """Trigger or silence alarm globally across Arduino hardware and dashboard."""
     set_global_alarm(req.alarm_active, req.threat_type or "manual", req.description or "")
+    try:
+        from backend.iot.mqtt_client import mqtt_service
+        mqtt_service.publish_alarm(
+            {
+                "alarm_active": req.alarm_active,
+                "threat_type": req.threat_type or "manual",
+                "description": req.description or "",
+                "timestamp": datetime.utcnow().timestamp(),
+            },
+            topic="omnisense/alerts/strobe",
+        )
+    except Exception:
+        pass
     return GLOBAL_ALARM_STATE
+
+
+class HardwareSelectionRequest(BaseModel):
+    vision_source: Optional[str] = None
+    enabled_sensors: Optional[List[str]] = None
+
+
+@router.get("/hardware/discover")
+def discover_system_hardware(current_user: User = Depends(get_current_user)):
+    """Probe and return only physically present cameras, COM Arduinos, and verified OS sensors."""
+    from backend.iot.hardware_discovery import discover_hardware
+    return discover_hardware()
+
+
+@router.post("/hardware/select")
+def select_system_hardware(
+    req: HardwareSelectionRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Apply operator-selected vision source and active sensor channels."""
+    from backend.iot.hardware_discovery import update_hardware_selection
+    return update_hardware_selection(
+        vision_source=req.vision_source,
+        enabled_sensors=req.enabled_sensors,
+    )
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)

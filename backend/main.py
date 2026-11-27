@@ -42,6 +42,23 @@ async def lifespan(app: FastAPI):
 
     # 4. Start MQTT background subscriber service
     mqtt_service.start()
+
+    # 5. Non-blocking model warmup in background so first inference has zero cold-start freeze
+    import threading
+    def _warmup_vision_models():
+        try:
+            import numpy as np
+            from backend.vision.detector import UniversalWorldDetector
+            det = UniversalWorldDetector.get_instance()
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            det.detect_all(blank, target_classes=["person"])
+            logger.info("Vision detector warmup pass completed.")
+        except Exception as we:
+            logger.debug(f"Vision warmup skipped: {we}")
+
+    if settings.ENVIRONMENT != "test":
+        threading.Thread(target=_warmup_vision_models, daemon=True, name="ModelWarmupThread").start()
+
     yield
 
     # 5. Clean shutdown handlers

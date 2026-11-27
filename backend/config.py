@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     # Gemini LLM API
     GEMINI_API_KEY: str = ""
 
-    # Local Ollama VLM Settings
-    VLM_PROVIDER: str = "ollama"  # "ollama", "gemini", "offline"
+    # VLM Provider ("gemini" for cloud TPU offloading, "ollama" for local, "offline")
+    VLM_PROVIDER: str = "gemini"
     OLLAMA_HOST: str = "http://127.0.0.1:11434"
     OLLAMA_MODEL: str = "moondream"
 
@@ -41,7 +41,9 @@ class Settings(BaseSettings):
     CAMERA_INDEX: int = 0
     FRAME_WIDTH: int = 640
     FRAME_HEIGHT: int = 480
-    TARGET_FPS: int = 15
+    TARGET_FPS: int = 20
+    JPEG_QUALITY: int = 75
+    RING_BUFFER_SECONDS: int = 4
     YOLO_MODEL_NAME: str = "yolov8n.pt"
 
     # Evidence Directory & Data Retention

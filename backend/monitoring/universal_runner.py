@@ -66,11 +66,13 @@ class UniversalMonitorRunner:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._vlm_in_flight = False
-        self._world_in_flight = False
+        self._ai_in_flight = False
+        self._screening_active = False
 
-        # Tunable parameters (from config or defaults)
-        self.target_fps: float = float(config.get("target_fps", 10.0))
-        self.vlm_every_n_frames: int = int(config.get("vlm_every_n_frames", 15))
+        # Tunable parameters (from config or unified 20 FPS default)
+        self.target_fps: float = float(config.get("target_fps", settings.TARGET_FPS))
+        self.vlm_debounce_seconds: float = float(config.get("vlm_debounce_seconds", 1.5))
+        self.yolo_interval_seconds: float = float(config.get("yolo_interval_seconds", 0.20))
         self.cooldown_seconds: float = float(config.get("cooldown_seconds", 20.0))
 
         self._motion_filter = MotionFilter(
@@ -83,9 +85,17 @@ class UniversalMonitorRunner:
         self._target_entities: list[str] = goal_spec["targets"]
         self._requires_vlm: bool = goal_spec["requires_vlm"]
 
+        self._prev_motion_state: bool = False
+        self._last_yolo_time: float = 0.0
+        self._last_vlm_time: float = 0.0
         self._last_incident_time: float = 0.0
         self._frame_counter: int = 0
+        self._last_cam_fid: int = -1
+        self._annotation_canvas: Optional[np.ndarray] = None
         self._latest_annotated: Optional[np.ndarray] = None
+        self._latest_jpeg_bytes: Optional[bytes] = None
+        self._latest_frame_id: int = -1
+        self._latest_timestamp_ms: float = 0.0
         self._last_result: Optional[ReasonerResult] = None
         self._live_boxes: list[dict] = []
         self._last_metrics: dict = {}
@@ -98,6 +108,14 @@ class UniversalMonitorRunner:
         if self._running:
             return
         self._running = True
+        # Pre-bake open-vocabulary CLIP text embeddings once before camera loop starts
+        if self._target_entities:
+            threading.Thread(
+                target=self._world_detector.prebake_classes,
+                args=(self._target_entities,),
+                daemon=True,
+                name=f"ClipPrebake-{self.task_id}",
+            ).start()
         camera_stream.start()
         self._thread = threading.Thread(
             target=self._worker_loop,
@@ -116,6 +134,11 @@ class UniversalMonitorRunner:
         with self._lock:
             return self._latest_annotated.copy() if self._latest_annotated is not None else None
 
+    def get_latest_jpeg(self) -> tuple[Optional[bytes], int, float]:
+        """Return pre-encoded JPEG bytes, frame ID, and capture timestamp_ms (zero event-loop CPU)."""
+        with self._lock:
+            return self._latest_jpeg_bytes, self._latest_frame_id, self._latest_timestamp_ms
+
     # ------------------------------------------------------------------
     # Core worker loop
     # ------------------------------------------------------------------
@@ -126,69 +149,79 @@ class UniversalMonitorRunner:
         while self._running:
             loop_start = time.time()
 
-            ok, frame = camera_stream.get_frame()
+            ok, frame, cam_fid, ts_ms = camera_stream.get_frame_meta()
             if not ok or frame is None:
-                time.sleep(0.05)
+                time.sleep(0.025)
                 continue
+
+            if cam_fid == self._last_cam_fid and cam_fid != -1:
+                time.sleep(0.01)
+                continue
+            self._last_cam_fid = cam_fid
 
             self._frame_counter += 1
             motion_detected, motion_score, motion_boxes = self._motion_filter.detect(frame)
 
-            # Tier 1 / Full Reasoner scheduling:
-            # - If goal is pure spatial/open-vocabulary (not requires_vlm), run continuously as fast as Tier 1 completes (~5-6 FPS)
-            # - If goal requires Tier 2 VLM (semantic action/state), keep Tier 1 live boxes running continuously in parallel
-            if not self._requires_vlm:
-                if not self._vlm_in_flight:
-                    self._vlm_in_flight = True
-                    threading.Thread(
-                        target=self._run_vlm_background,
-                        args=(frame.copy(), motion_score),
-                        daemon=True,
-                    ).start()
-            else:
-                if not self._world_in_flight:
-                    self._world_in_flight = True
-                    threading.Thread(
-                        target=self._run_live_boxes_background,
-                        args=(frame.copy(),),
-                        daemon=True,
-                    ).start()
+            # Rising-Edge Immediate Trigger (0ms blind delay when movement starts)
+            motion_rising_edge = motion_detected and not self._prev_motion_state
+            self._prev_motion_state = motion_detected
+            now_ts = time.time()
 
-                should_reason = (
-                    not self._vlm_in_flight
-                    and (
-                        self._frame_counter == 1
-                        or (motion_detected and self._frame_counter % self.vlm_every_n_frames == 0)
-                        or (self._frame_counter % 50 == 0)
-                    )
+            # Single-Inference Producer Scheduling (4-5 FPS decoupled YOLO cadence, instant on rising edge)
+            should_run_ai = (
+                not self._ai_in_flight
+                and (
+                    self._frame_counter == 1
+                    or motion_rising_edge
+                    or (now_ts - self._last_yolo_time) >= self.yolo_interval_seconds
                 )
-                if should_reason:
-                    self._vlm_in_flight = True
-                    threading.Thread(
-                        target=self._run_vlm_background,
-                        args=(frame.copy(), motion_score),
-                        daemon=True,
-                    ).start()
+            )
+            if should_run_ai:
+                self._ai_in_flight = True
+                self._last_yolo_time = now_ts
+                threading.Thread(
+                    target=self._run_ai_pipeline_background,
+                    args=(frame, motion_detected, motion_score, motion_rising_edge),
+                    daemon=True,
+                ).start()
 
-            # Always annotate and stream frame at full FPS (live object boxes + red alert isolation)
+            # Annotate onto pre-allocated canvas and pre-encode JPEG ONCE in worker thread
             annotated = self._annotate_frame(frame, self._last_result, motion_score, motion_boxes)
+            quality = getattr(settings, "JPEG_QUALITY", 75)
+            ret, buf = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            jpeg_bytes = buf.tobytes() if ret else None
+
             with self._lock:
                 self._latest_annotated = annotated
+                if jpeg_bytes is not None:
+                    self._latest_jpeg_bytes = jpeg_bytes
+                    self._latest_frame_id = self._frame_counter
+                    self._latest_timestamp_ms = ts_ms
 
             # Broadcast live metrics via WebSocket (thread-safe)
-            if self._frame_counter % 5 == 0:
+            if self._frame_counter % 4 == 0:
                 self._broadcast_metrics_sync(self._last_result)
 
-            # Sleep to maintain target FPS
+            # Sleep to maintain unified target FPS
             elapsed = time.time() - loop_start
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-    def _run_live_boxes_background(self, frame: np.ndarray):
-        """Continuously update live open-vocabulary bounding boxes during Tier 2 VLM tasks."""
+    def _run_ai_pipeline_background(
+        self,
+        frame: np.ndarray,
+        motion_detected: bool,
+        motion_score: float,
+        motion_rising_edge: bool,
+    ):
+        """
+        Single-Inference Producer Pipeline:
+        Runs YOLO ONCE per cycle, updates live HUD boxes immediately, and reuses
+        precomputed detections in Tier 2 Gemini VLM with temporal sliding window.
+        """
         try:
-            detections, _, _ = self._world_detector.detect_all(
+            detections, engine, latency = self._world_detector.detect_all(
                 frame,
                 target_classes=self._target_entities if self._target_entities else None,
             )
@@ -207,18 +240,78 @@ class UniversalMonitorRunner:
                     "box_2d": [ymin, xmin, ymax, xmax],
                 })
             self._live_boxes = boxes
-        except Exception as e:
-            logger.debug(f"Live boxes thread error: {e}")
-        finally:
-            self._world_in_flight = False
 
-    def _run_vlm_background(self, frame: np.ndarray, motion_score: float):
-        """Run VLM/World reasoning and incident handling off the video frame loop."""
-        try:
             sensor_ctx = self._get_sensor_context()
-            result = self._reasoner.reason(frame, self.user_goal, sensor_ctx)
+
+            if not self._requires_vlm:
+                # Tier 1 spatial/count resolves directly using precomputed detections (0 extra YOLO runs)
+                result = self._reasoner.reason(
+                    frame,
+                    self.user_goal,
+                    sensor_ctx,
+                    precomputed_detections=detections,
+                    world_engine=engine,
+                    world_latency=latency,
+                )
+                self._last_result = result
+                self._last_metrics = result.metrics
+                self._last_metrics["motion_score"] = round(motion_score, 3)
+                self._last_metrics["vlm_latency_ms"] = round(result.latency_ms, 1)
+
+                if result.incident_detected:
+                    self._handle_incident(frame, result)
+                    self._broadcast_metrics_sync(result)
+            else:
+                # Tier 2 semantic verification: rising-edge instant trigger + 1.5s debounce + 5.0s idle heartbeat
+                now_ts = time.time()
+                should_vlm = (
+                    not self._vlm_in_flight
+                    and (
+                        self._frame_counter == 1
+                        or motion_rising_edge
+                        or (motion_detected and (now_ts - self._last_vlm_time) >= self.vlm_debounce_seconds)
+                        or ((now_ts - self._last_vlm_time) >= 5.0)
+                    )
+                )
+                if should_vlm:
+                    self._vlm_in_flight = True
+                    self._screening_active = True
+                    self._last_vlm_time = now_ts
+                    ring_items = camera_stream.get_ring_buffer_frames(max_frames=3)
+                    temporal_jpegs = [jpg for _, jpg in ring_items] if ring_items else None
+                    threading.Thread(
+                        target=self._run_vlm_verify_background,
+                        args=(frame, detections, engine, latency, motion_score, temporal_jpegs, sensor_ctx),
+                        daemon=True,
+                    ).start()
+        except Exception as e:
+            logger.error(f"[Task {self.task_id}] AI pipeline error: {e}")
+        finally:
+            self._ai_in_flight = False
+
+    def _run_vlm_verify_background(
+        self,
+        frame: np.ndarray,
+        detections: list,
+        engine: str,
+        latency: float,
+        motion_score: float,
+        temporal_jpegs: Optional[list[bytes]],
+        sensor_ctx: dict,
+    ):
+        """Run asynchronous deep cognitive verification using precomputed boxes + sliding window."""
+        try:
+            result = self._reasoner.reason(
+                frame,
+                self.user_goal,
+                sensor_ctx,
+                precomputed_detections=detections,
+                temporal_jpegs=temporal_jpegs,
+                world_engine=engine,
+                world_latency=latency,
+            )
             self._last_result = result
-            if result.boxes:
+            if result.boxes and not self._live_boxes:
                 self._live_boxes = result.boxes
             self._last_metrics = result.metrics
             self._last_metrics["motion_score"] = round(motion_score, 3)
@@ -226,10 +319,11 @@ class UniversalMonitorRunner:
 
             if result.incident_detected:
                 self._handle_incident(frame, result)
-                self._broadcast_metrics_sync(result)
+            self._broadcast_metrics_sync(result)
         except Exception as e:
-            logger.error(f"[Task {self.task_id}] Background VLM error: {e}")
+            logger.error(f"[Task {self.task_id}] Background VLM verify error: {e}")
         finally:
+            self._screening_active = False
             self._vlm_in_flight = False
 
     # ------------------------------------------------------------------
@@ -243,17 +337,13 @@ class UniversalMonitorRunner:
             return
         self._last_incident_time = now
 
-        # Save evidence snapshot
-        evidence_path = self._save_evidence(frame, result)
+        ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        expected_evidence_path = str(Path(settings.EVIDENCE_DIR) / f"task_{self.task_id}_{ts_str}.jpg")
 
-        # Persist to database
-        self._persist_event(result, evidence_path)
-
-        # Trigger Arduino alarm if physical danger
+        # 1. CRITICAL PATH (<5ms): Direct in-memory alarm + MQTT push + WebSocket alert
         if result.action_required == "alarm":
-            self._trigger_hardware_alarm()
+            self._trigger_hardware_alarm(result.explanation)
 
-        # Broadcast event_alert over WebSocket for instant toast notification across the whole app
         try:
             alert_payload = {
                 "type": "event_alert",
@@ -263,26 +353,36 @@ class UniversalMonitorRunner:
                     "severity": "critical" if result.action_required == "alarm" else "high",
                     "description": result.explanation,
                     "confidence": result.confidence,
-                    "evidence_screenshot_path": evidence_path,
+                    "evidence_screenshot_path": expected_evidence_path,
                 }
             }
             dashboard_ws_manager.broadcast_sync(alert_payload)
         except Exception as e:
             logger.debug(f"Failed to broadcast event_alert: {e}")
 
+        # 2. BACKGROUND FIRE-AND-FORGET: Offload disk cv2.imwrite + SQLite commit off video loop
+        snapshot_copy = frame.copy()
+        threading.Thread(
+            target=self._persist_evidence_async,
+            args=(snapshot_copy, result, expected_evidence_path),
+            daemon=True,
+            name=f"IncidentPersist-{self.task_id}",
+        ).start()
+
         logger.warning(
             f"[Task {self.task_id}] INCIDENT [{result.action_required.upper()}]: "
             f"{result.explanation} (confidence: {result.confidence:.0%})"
         )
 
-    def _save_evidence(self, frame: np.ndarray, result: ReasonerResult) -> str:
-        evidence_dir = Path(settings.EVIDENCE_DIR)
-        evidence_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        filename = f"task_{self.task_id}_{ts}.jpg"
-        filepath = evidence_dir / filename
-        cv2.imwrite(str(filepath), frame)
-        return str(filepath)
+    def _persist_evidence_async(self, frame: np.ndarray, result: ReasonerResult, filepath_str: str):
+        """Background worker for disk image write and SQLite commit."""
+        try:
+            filepath = Path(filepath_str)
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(filepath), frame)
+            self._persist_event(result, str(filepath))
+        except Exception as e:
+            logger.error(f"Async incident persistence failed: {e}")
 
     def _persist_event(self, result: ReasonerResult, evidence_path: str):
         db: Session = SessionLocal()
@@ -312,17 +412,24 @@ class UniversalMonitorRunner:
         finally:
             db.close()
 
-    def _trigger_hardware_alarm(self):
-        """Signal Arduino to activate physical strobe/buzzer."""
+    def _trigger_hardware_alarm(self, description: str = ""):
+        """Direct in-memory state update + sub-2ms MQTT strobe push (zero loopback HTTP)."""
         try:
-            import requests
-            requests.post(
-                "http://localhost:8000/api/devices/alarm/trigger",
-                json={"alarm_active": True, "threat_type": self.user_goal},
-                timeout=1.0,
+            from backend.api.devices import set_global_alarm
+            from backend.iot.mqtt_client import mqtt_service
+
+            set_global_alarm(True, threat_type=self.user_goal, description=description)
+            mqtt_service.publish_alarm(
+                {
+                    "alarm_active": True,
+                    "threat_type": self.user_goal,
+                    "description": description,
+                    "timestamp": time.time(),
+                },
+                topic="omnisense/alerts/strobe",
             )
-        except Exception:
-            pass  # Non-critical — alarm is optional hardware
+        except Exception as e:
+            logger.debug(f"Direct alarm trigger warning: {e}")
 
     # ------------------------------------------------------------------
     # Frame annotation
@@ -331,7 +438,10 @@ class UniversalMonitorRunner:
     def _annotate_frame(
         self, frame, result, motion_score, motion_boxes=None
     ):
-        annotated = frame.copy()
+        if self._annotation_canvas is None or self._annotation_canvas.shape != frame.shape:
+            self._annotation_canvas = np.empty_like(frame)
+        np.copyto(self._annotation_canvas, frame)
+        annotated = self._annotation_canvas
         h, w = annotated.shape[:2]
 
         is_alert = bool(
@@ -373,10 +483,22 @@ class UniversalMonitorRunner:
             x2 = max(0, min(w - 1, int(xmax * w / 1000)))
             y2 = max(0, min(h - 1, int(ymax * h / 1000)))
 
-            # Red (0, 0, 235) for active alert box; calm cyan (230, 190, 0) for live ambient boxes
-            box_color = (0, 0, 235) if is_alert else (230, 190, 0)
+            # Confidence-Shaded Visual Feedback:
+            #   >=0.90 or alert -> Deep Crimson Red (38, 38, 220)
+            #   0.70 - 0.89     -> Vivid Red-Orange (12, 88, 234)
+            #   0.40 - 0.69     -> Soft Amber/Orange (11, 158, 245)
+            #   <0.40           -> Calm Cyan (212, 182, 6)
             label = str(b.get("label", "OBJECT")).upper()
-            box_conf = b.get("confidence", result.confidence if result else 0.0)
+            box_conf = float(b.get("confidence", result.confidence if result else 0.0))
+
+            if is_alert or (b.get("is_target") and box_conf >= 0.90):
+                box_color = (38, 38, 220)
+            elif b.get("is_target") and box_conf >= 0.70:
+                box_color = (12, 88, 234)
+            elif (b.get("is_target") and box_conf >= 0.40) or (self._screening_active and b.get("is_target")):
+                box_color = (11, 158, 245)
+            else:
+                box_color = (212, 182, 6)
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2 if is_alert else 1)
             c_len = min(16, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
@@ -409,8 +531,11 @@ class UniversalMonitorRunner:
         status_color = (0, 200, 0)
         status_text = "MONITORING ACTIVE"
         if result and result.incident_detected:
-            status_color = (0, 0, 220) if result.action_required == "alarm" else (0, 140, 255)
-            status_text = f"ALERT: {result.action_required.upper()} - {result.explanation[:60]}"
+            status_color = (38, 38, 220) if result.action_required == "alarm" else (12, 88, 234)
+            status_text = f"VERIFIED {result.action_required.upper()}: {result.explanation[:55]}"
+        elif self._screening_active:
+            status_color = (11, 158, 245)
+            status_text = "SCREENING (Verifying temporal window...)"
 
         cv2.rectangle(annotated, (0, 0), (w, 36), (20, 20, 20), -1)
         cv2.putText(annotated, status_text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, status_color, 1, cv2.LINE_AA)
@@ -493,7 +618,7 @@ class UniversalMonitorRunner:
             active.append("safety_status")
             active.append("incident_timeline")
 
-        # IoT / sensor metrics
+        # IoT / sensor metrics (Arduino)
         if sensor_ctx.get("temperature") is not None:
             active.append("temperature")
         if sensor_ctx.get("humidity") is not None:
@@ -503,22 +628,33 @@ class UniversalMonitorRunner:
         if sensor_ctx.get("motion_detected") is not None:
             active.append("pir_motion")
 
+        # Verified Host OS metrics (psutil)
+        if sensor_ctx.get("cpu_percent") is not None:
+            active.append("cpu_percent")
+        if sensor_ctx.get("memory_percent") is not None:
+            active.append("memory_percent")
+        if sensor_ctx.get("battery_percent") is not None:
+            active.append("battery_percent")
+
         # Always show motion score
         active.append("motion_score")
 
         return active
 
     # ------------------------------------------------------------------
-    # Sensor context from IoT layer
+    # Sensor context from verified & user-selected hardware
     # ------------------------------------------------------------------
 
     def _get_sensor_context(self) -> dict:
-        """Pull latest sensor data from MQTT/Arduino telemetry layer."""
+        """Pull live readings strictly from physically present, user-selected hardware."""
         try:
-            data = get_latest_sensor_data()
-            return data or {}
+            from backend.iot.hardware_discovery import get_selected_sensor_context
+            return get_selected_sensor_context()
         except Exception:
-            return {}
+            try:
+                return get_latest_sensor_data() or {}
+            except Exception:
+                return {}
 
 # ------------------------------------------------------------------
 # Global task registry
@@ -562,6 +698,16 @@ def get_latest_vision_frame() -> Optional[np.ndarray]:
             if frame is not None:
                 return frame
     return None
+
+
+def get_latest_jpeg_frame() -> tuple[Optional[bytes], int, float]:
+    """Retrieve pre-encoded JPEG bytes, frame_id, and timestamp_ms from any active universal runner."""
+    with _registry_lock:
+        for runner in _active_runners.values():
+            jpeg_bytes, fid, ts_ms = runner.get_latest_jpeg()
+            if jpeg_bytes is not None:
+                return jpeg_bytes, fid, ts_ms
+    return None, -1, 0.0
 
 
 def stop_all():

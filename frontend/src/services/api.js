@@ -113,6 +113,15 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ alarm_active, threat_type, description })
     }),
+    resetAlarm: () => this.request('/api/devices/alarm', {
+      method: 'POST',
+      body: JSON.stringify({ alarm_active: false, threat_type: 'none', description: 'Cleared by operator' })
+    }),
+    discoverHardware: () => this.request('/api/devices/hardware/discover'),
+    selectHardware: (vision_source, enabled_sensors) => this.request('/api/devices/hardware/select', {
+      method: 'POST',
+      body: JSON.stringify({ vision_source, enabled_sensors })
+    }),
   };
 
   // Events Endpoints
@@ -162,7 +171,15 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ source: String(source) })
     }),
+    switchCamera: (source) => this.request('/api/video/source', {
+      method: 'POST',
+      body: JSON.stringify({ source: String(source) })
+    }),
     setRotation: (rotation) => this.request('/api/video/rotation', {
+      method: 'POST',
+      body: JSON.stringify({ rotation: Number(rotation) })
+    }),
+    rotateCamera: (rotation) => this.request('/api/video/rotation', {
       method: 'POST',
       body: JSON.stringify({ rotation: Number(rotation) })
     }),
